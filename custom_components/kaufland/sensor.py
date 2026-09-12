@@ -58,7 +58,7 @@ class KauflandOffersSensor(
     _attr_native_unit_of_measurement = "items"
     _attr_has_entity_name = True
     _attr_name = "Offers"
-    _unrecorded_attributes = frozenset({"discounts"})
+    _unrecorded_attributes = frozenset({"discounts", "discounts_by_date"})
 
     def __init__(self, coordinator: KauflandDataUpdateCoordinator) -> None:
         """Initialize sensor."""
@@ -94,6 +94,7 @@ class KauflandOffersSensor(
             "valid_from": data.get("valid_from"),
             "valid_until": data.get("valid_until"),
             "discounts": data.get("offers", []),
+            "discounts_by_date": data.get("offers_by_date", {}),
             ATTR_ATTRIBUTION: ATTRIBUTION,
         }
 
@@ -211,6 +212,8 @@ class KauflandProductFilterSensor(
             "product_title": best_match.get("title"),
             "category": best_match.get("category"),
             "picture_link": best_match.get("image_url"),
+            "valid_from": best_match.get("date_from"),
+            "valid_until": best_match.get("date_to"),
             "matches": matches,
             ATTR_ATTRIBUTION: ATTRIBUTION,
         }

@@ -8,11 +8,13 @@ This client mirrors that public, anonymous access:
   (id, name, address, postcode, city, coordinates, opening hours, ...).
 - The rendered ``/angebote/uebersicht.html`` page is server-side rendered
   with the currently valid offers for whichever store is selected via the
-  ``x-aem-variant`` cookie (e.g. ``DE2553``). No AJAX/JSON product-detail
-  API is exposed publicly, so offer details (title, price, discount, image)
-  are parsed directly out of the server-rendered HTML.
-- ``.kloffers.storeName={code}.json`` returns the validity date range
-  (``dateFrom``/``dateTo``) for the current batch of offers for a store.
+  ``x-aem-variant`` cookie (e.g. ``DE2553``). The page embeds a
+  ``window.SSR[...] = {"component":"OfferTemplate", ...}`` JSON payload
+  containing the complete, structured offer catalogue (every category and
+  every offer for the current AND the next promotional week, each with its
+  own ``dateFrom``/``dateTo`` validity), so that payload is parsed directly
+  instead of scraping the rendered product tiles (which only reflect
+  whichever single day/category tab happens to be selected in the UI).
 
 If anything fails, methods raise ``RuntimeError`` rather than silently
 returning fabricated placeholder data.
@@ -20,8 +22,8 @@ returning fabricated placeholder data.
 
 from __future__ import annotations
 
+import json
 import logging
-import re
 from typing import Any
 
 from curl_cffi import requests
@@ -32,28 +34,72 @@ _LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://filiale.kaufland.de"
 STOREFINDER_URL = f"{BASE_URL}/.klstorefinder.json"
 OFFERS_HTML_URL = f"{BASE_URL}/angebote/uebersicht.html"
-OFFERS_META_URL_TEMPLATE = f"{BASE_URL}/.kloffers.storeName={{store_code}}.json"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-_TILE_RE = re.compile(r'<a class="k-product-tile"[^>]*>(.*?)</a>', re.DOTALL)
-_HEADING_RE = re.compile(
-    r'<h2 class="k-product-section__headline[^"]*">([^<]*)</h2>'
-)
-_IMG_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"')
-_IMG_ALT_RE = re.compile(r'<img[^>]+alt="([^"]*)"')
-_TITLE_RE = re.compile(r'class="k-product-tile__title">([^<]*)<')
-_SUBTITLE_RE = re.compile(r'class="k-product-tile__subtitle">([^<]*)<')
-_UNIT_PRICE_RE = re.compile(r'class="k-product-tile__unit-price">([^<]*)<')
-_DISCOUNT_RE = re.compile(r'class="k-price-tag__discount">([^<]*)<')
-_PRICE_RE = re.compile(r'class="k-price-tag__price">([^<]*)<')
-_OLD_PRICE_RE = re.compile(
-    r'class="k-price-tag__old-price-line-through">([^<]*)<'
-)
-_KLNR_RE = re.compile(r"/is/image/schwarz/([A-Za-z0-9]+)")
+_SSR_MARKER = "window.SSR['"
+_OFFER_TEMPLATE_MARKER = '"component":"OfferTemplate"'
+
+
+def _find_matching_brace(text: str, start: int) -> int | None:
+    """Return the index of the ``}`` that closes the ``{`` at ``start``."""
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _extract_offer_template_payload(html: str) -> dict[str, Any] | None:
+    """Extract the embedded ``window.SSR`` ``OfferTemplate`` JSON payload.
+
+    The offers page embeds one or more
+    ``window.SSR['<uuid>'] = {...};`` script blocks. We look for the one
+    whose object contains ``"component":"OfferTemplate"`` and parse it as
+    JSON, using brace-matching (rather than a regex) since the payload
+    contains arbitrarily nested objects/arrays and string values that may
+    themselves contain ``{``/``}`` characters.
+    """
+    search_start = 0
+    while True:
+        marker_idx = html.find(_SSR_MARKER, search_start)
+        if marker_idx == -1:
+            return None
+        brace_start = html.find("{", marker_idx)
+        if brace_start == -1:
+            return None
+        if html[brace_start : brace_start + 200].find(_OFFER_TEMPLATE_MARKER) == -1:
+            search_start = brace_start + 1
+            continue
+        brace_end = _find_matching_brace(html, brace_start)
+        if brace_end is None:
+            return None
+        blob = html[brace_start : brace_end + 1]
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError as exc:
+            _LOGGER.debug("Failed to parse Kaufland OfferTemplate payload: %s", exc)
+            return None
 
 
 class Store(BaseModel):
@@ -174,82 +220,80 @@ class KauflandAPIClient:
                 return store
         return None
 
-    def _get_offer_validity(self, store_code: str) -> tuple[str | None, str | None]:
-        """Return (valid_from, valid_until) for the current offers batch."""
-        url = OFFERS_META_URL_TEMPLATE.format(store_code=store_code)
-        try:
-            response = self._get(url)
-            data = response.json()
-        except Exception as exc:
-            _LOGGER.debug("Kaufland offers validity lookup failed: %s", exc)
-            return None, None
-
-        if isinstance(data, list) and data:
-            first = data[0]
-            return first.get("dateFrom"), first.get("dateTo")
-        return None, None
-
     def get_offers(self, store_code: str) -> dict[str, Any]:
-        """Fetch and parse the currently valid weekly offers for a store."""
+        """Fetch and parse the currently valid weekly offers for a store.
+
+        The offers page's embedded ``OfferTemplate`` JSON payload holds
+        every promotional "cycle" known to the storefront at once (usually
+        the current week, a "start of week" highlight batch, and the
+        upcoming week), each broken down into categories and, within each
+        category, individual offers with their own ``dateFrom``/``dateTo``
+        validity window. Parsing that payload (rather than the rendered
+        product tiles, which only ever show whichever single day/category
+        tab is currently selected) yields the complete catalogue in one
+        request.
+        """
         html = self._get(
             OFFERS_HTML_URL, cookies={"x-aem-variant": store_code}
         ).text
 
-        headings = [(m.start(), m.group(1).strip()) for m in _HEADING_RE.finditer(html)]
-        heading_idx = 0
-
-        offers: list[dict[str, Any]] = []
-        for match in _TILE_RE.finditer(html):
-            block = match.group(1)
-            pos = match.start()
-
-            category = ""
-            while heading_idx < len(headings) and headings[heading_idx][0] <= pos:
-                category = headings[heading_idx][1]
-                heading_idx += 1
-
-            price_match = _PRICE_RE.search(block)
-            title_match = _TITLE_RE.search(block)
-            if not price_match or not title_match or not title_match.group(1).strip():
-                continue
-
-            img_src_match = _IMG_SRC_RE.search(block)
-            img_src = img_src_match.group(1) if img_src_match else ""
-            kl_nr_match = _KLNR_RE.search(img_src)
-
-            alt_match = _IMG_ALT_RE.search(block)
-            subtitle_match = _SUBTITLE_RE.search(block)
-            unit_price_match = _UNIT_PRICE_RE.search(block)
-            discount_match = _DISCOUNT_RE.search(block)
-            old_price_match = _OLD_PRICE_RE.search(block)
-
-            offers.append(
-                {
-                    "kl_nr": kl_nr_match.group(1) if kl_nr_match else None,
-                    "title": title_match.group(1).strip()
-                    or (alt_match.group(1).strip() if alt_match else ""),
-                    "category": category,
-                    "subtitle": subtitle_match.group(1).strip()
-                    if subtitle_match
-                    else "",
-                    "price_per_unit": unit_price_match.group(1).strip()
-                    if unit_price_match
-                    else "",
-                    "price": price_match.group(1).strip(),
-                    "old_price": old_price_match.group(1).strip()
-                    if old_price_match
-                    else "",
-                    "discount": discount_match.group(1).strip()
-                    if discount_match
-                    else "",
-                    "image_url": img_src,
-                }
+        payload = _extract_offer_template_payload(html)
+        if payload is None:
+            raise RuntimeError(
+                "Kaufland offers page did not contain the expected offer data"
             )
 
-        valid_from, valid_until = self._get_offer_validity(store_code)
+        cycles = payload.get("props", {}).get("offerData", {}).get("cycles", [])
+
+        offers: list[dict[str, Any]] = []
+        for cycle in cycles:
+            for category in cycle.get("categories", []):
+                category_name = category.get("displayName") or category.get("name") or ""
+                category_color = category.get("colorCode")
+                for offer in category.get("offers", []):
+                    title = (offer.get("title") or offer.get("detailTitle") or "").strip()
+                    if not title:
+                        continue
+                    discount = offer.get("discount")
+                    offers.append(
+                        {
+                            "kl_nr": offer.get("klNr"),
+                            "title": title,
+                            "category": category_name,
+                            "category_color": category_color,
+                            "subtitle": (offer.get("detailDescription") or "").strip(),
+                            "price_per_unit": offer.get("unit") or "",
+                            "price": str(
+                                offer.get("formattedPrice")
+                                or offer.get("price")
+                                or ""
+                            ),
+                            "old_price": str(offer.get("formattedOldPrice") or ""),
+                            "discount": f"-{discount}%" if discount else "",
+                            "image_url": offer.get("listImage") or "",
+                            "date_from": offer.get("dateFrom"),
+                            "date_to": offer.get("dateTo"),
+                        }
+                    )
+
+        date_froms = [offer["date_from"] for offer in offers if offer.get("date_from")]
+        date_tos = [offer["date_to"] for offer in offers if offer.get("date_to")]
+        valid_from = min(date_froms) if date_froms else None
+        valid_until = max(date_tos) if date_tos else None
+
+        offers_by_date: dict[str, list[dict[str, Any]]] = {}
+        for offer in offers:
+            date_from = offer.get("date_from")
+            date_to = offer.get("date_to")
+            if not date_from:
+                continue
+            key = date_from if date_from == date_to else f"{date_from} – {date_to}"
+            offers_by_date.setdefault(key, []).append(offer)
+        offers_by_date = dict(sorted(offers_by_date.items()))
 
         return {
             "offers": offers,
+            "offers_by_date": offers_by_date,
             "valid_from": valid_from,
             "valid_until": valid_until,
         }
