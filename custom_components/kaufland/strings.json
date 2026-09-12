@@ -1,0 +1,49 @@
+{
+  "config": {
+    "flow_title": "Setup Kaufland weekly offers",
+    "step": {
+      "user": {
+        "description": "Type your city or postal code to search for nearby Kaufland stores. No Kaufland account or login is required.",
+        "data": {
+          "search_query": "City or Postal Code"
+        }
+      },
+      "select_store": {
+        "description": "Select your Kaufland store from the search results below.",
+        "data": {
+          "store_code": "Select Store"
+        }
+      },
+      "discovery_confirm": {
+        "title": "Kaufland store found nearby",
+        "description": "A Kaufland store was discovered near your Home Assistant location:\n\n**{name}**\n{address}, {city}\n\nWould you like to add it?"
+      }
+    },
+    "abort": {
+      "already_configured": "This Kaufland store is already configured.",
+      "no_stores_found": "No Kaufland stores found matching your query."
+    },
+    "error": {
+      "search_failed": "Failed to query the Kaufland store finder.",
+      "no_stores_found": "No Kaufland stores found matching your query. Please try another search.",
+      "unknown": "Unknown error occurred."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Kaufland weekly offers",
+        "data": {
+          "update_interval": "Update Interval (hours, min 1, max 168)",
+          "product_filters": "Product filters (keywords to monitor for offers)"
+        }
+      }
+    }
+  },
+  "issues": {
+    "connection_error": {
+      "title": "Error communicating with Kaufland",
+      "description": "The integration is unable to fetch offers. Please check the logs."
+    }
+  }
+}
