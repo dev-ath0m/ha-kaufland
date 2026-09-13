@@ -55,10 +55,10 @@
       },
       "account_init": {
         "title": "Configure Kaufland account",
-        "description": "Optional: to also track in-store/regular Kaufland Card XTRA coupons (not marketplace coupons), paste a session cookie value below. Log into https://www.kaufland.de in a normal browser, open Developer Tools \u2192 Application/Storage \u2192 Cookies, find the cookie named 'ALTSESSID', and copy its value here. This cookie is short-lived and you will need to come back and refresh it whenever a repair issue says it's expired. Leave blank to disable in-store coupon tracking.",
+        "description": "Optional but recommended: paste a session cookie value below to (1) let this integration actually activate free marketplace coupons automatically (without it, activation always fails with 'Missing session cookie'), and (2) also track in-store/regular Kaufland Card XTRA coupons for read-only display. Log into https://www.kaufland.de in a normal browser, open Developer Tools \u2192 Application/Storage \u2192 Cookies, find the cookie named 'ALTSESSID', and copy its value here. This cookie is short-lived and you will need to come back and refresh it whenever a repair issue says it's expired. Leave blank to disable both features.",
         "data": {
           "auto_activate_free_coupons": "Automatically activate free Kaufland Card XTRA coupons (0 loyalty points)",
-          "instore_session_cookie": "In-store coupons session cookie (ALTSESSID, optional)"
+          "instore_session_cookie": "Session cookie (ALTSESSID) - required for coupon activation and in-store coupons"
         }
       }
     }
