@@ -10,7 +10,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_ACCOUNT
+from .const import DOMAIN
 from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,15 +22,18 @@ async def async_setup_entry(
     async_add_entities: Any,
 ) -> None:
     """Set up Kaufland buttons from a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinators = hass.data[DOMAIN][entry.entry_id]
+    entities: list[Any] = []
 
-    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
-        async_add_entities(
-            [KauflandActivateAllCouponsButton(coordinator)], update_before_add=False
-        )
-        return
+    store_coordinator = coordinators.get("store")
+    if store_coordinator is not None:
+        entities.append(KauflandForceUpdateButton(store_coordinator))
 
-    async_add_entities([KauflandForceUpdateButton(coordinator)], update_before_add=False)
+    account_coordinator = coordinators.get("account")
+    if account_coordinator is not None:
+        entities.append(KauflandActivateAllCouponsButton(account_coordinator))
+
+    async_add_entities(entities, update_before_add=False)
 
 
 class KauflandForceUpdateButton(ButtonEntity):
