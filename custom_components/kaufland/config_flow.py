@@ -66,6 +66,11 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
         self._code_verifier: str | None = None
         self._state: str | None = None
         self._authorize_url: str | None = None
+        # Set when the user opted to also link their Kaufland account while
+        # adding a store, so the store + account get created as ONE entry
+        # (grouped together) instead of two separate, unrelated entries.
+        self._pending_store_data: dict[str, Any] | None = None
+        self._pending_store_title: str | None = None
 
     async def async_step_integration_discovery(
         self, discovery_info: dict[str, Any]
@@ -162,17 +167,24 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
             else:
                 await self.async_set_unique_id(f"kaufland_{store_code}")
                 self._abort_if_unique_id_configured()
+
+                self._pending_store_data = {
+                    CONF_ENTRY_TYPE: ENTRY_TYPE_STORE,
+                    CONF_STORE_CODE: store.store_code,
+                    "name": store.name,
+                    "street": store.street,
+                    "postal_code": store.postal_code,
+                    "city": store.city,
+                    "friendly_url": store.friendly_url,
+                }
+                self._pending_store_title = f"Kaufland {store.title}"
+
+                if user_input.get("link_account"):
+                    return await self.async_step_link_account()
+
                 return self.async_create_entry(
-                    title=f"Kaufland {store.title}",
-                    data={
-                        CONF_ENTRY_TYPE: ENTRY_TYPE_STORE,
-                        CONF_STORE_CODE: store.store_code,
-                        "name": store.name,
-                        "street": store.street,
-                        "postal_code": store.postal_code,
-                        "city": store.city,
-                        "friendly_url": store.friendly_url,
-                    },
+                    title=self._pending_store_title,
+                    data=self._pending_store_data,
                 )
 
         store_options = [
@@ -189,6 +201,7 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Optional("link_account", default=False): bool,
             }
         )
 
@@ -232,6 +245,26 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
                 errors["base"] = "auth_failed"
             else:
                 email = tokens.get("email")
+                account_data = {
+                    CONF_ACCOUNT_EMAIL: email,
+                    CONF_ACCESS_TOKEN: tokens["access_token"],
+                    CONF_REFRESH_TOKEN: tokens["refresh_token"],
+                    CONF_TOKEN_EXPIRES_AT: tokens["expires_at"],
+                }
+                options = {
+                    CONF_AUTO_ACTIVATE_FREE_COUPONS: DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
+                }
+
+                if self._pending_store_data is not None:
+                    # Store + account link in one go (unique_id was already
+                    # set/checked for the store in async_step_select_store)
+                    # -> one entry, grouped together, instead of two.
+                    return self.async_create_entry(
+                        title=self._pending_store_title or "Kaufland",
+                        data={**self._pending_store_data, **account_data},
+                        options=options,
+                    )
+
                 sub = tokens.get("sub")
                 await self.async_set_unique_id(f"kaufland_account_{sub or email}")
                 self._abort_if_unique_id_configured()
@@ -239,14 +272,9 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
                     title=f"Kaufland account ({email})" if email else "Kaufland account",
                     data={
                         CONF_ENTRY_TYPE: ENTRY_TYPE_ACCOUNT,
-                        CONF_ACCOUNT_EMAIL: email,
-                        CONF_ACCESS_TOKEN: tokens["access_token"],
-                        CONF_REFRESH_TOKEN: tokens["refresh_token"],
-                        CONF_TOKEN_EXPIRES_AT: tokens["expires_at"],
+                        **account_data,
                     },
-                    options={
-                        CONF_AUTO_ACTIVATE_FREE_COUPONS: DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
-                    },
+                    options=options,
                 )
 
         # Re-show the same form, with the same still-pending PKCE challenge,
@@ -264,22 +292,39 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Return options flow handler."""
-        if config_entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
-            return KauflandAccountOptionsFlowHandler(config_entry)
-        return KauflandOptionsFlowHandler(config_entry)
+        if CONF_STORE_CODE in config_entry.data:
+            return KauflandOptionsFlowHandler(config_entry)
+        return KauflandAccountOptionsFlowHandler(config_entry)
 
 
 class KauflandOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for a Kaufland store entry."""
+    """Handle options flow for a Kaufland store entry (which may also have
+    a linked account - store settings, account settings and linking an
+    account are all reachable from a menu here so both live under the
+    same entry instead of a separate one).
+    """
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
         self._config_entry = config_entry
+        self._code_verifier: str | None = None
+        self._state: str | None = None
+        self._authorize_url: str | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Manage the options."""
+        """Show a menu of what to configure."""
+        if CONF_REFRESH_TOKEN in self._config_entry.data:
+            menu_options = ["store_settings", "account_settings"]
+        else:
+            menu_options = ["store_settings", "link_account"]
+        return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    async def async_step_store_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Manage the weekly-offers options."""
         if user_input is not None:
             product_filters_input = user_input.get(CONF_PRODUCT_FILTERS, [])
             if isinstance(product_filters_input, str):
@@ -294,6 +339,7 @@ class KauflandOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(
                 title="",
                 data={
+                    **self._config_entry.options,
                     CONF_UPDATE_INTERVAL: user_input[CONF_UPDATE_INTERVAL],
                     CONF_PRODUCT_FILTERS: product_filters,
                 },
@@ -322,7 +368,98 @@ class KauflandOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="store_settings", data_schema=schema)
+
+    async def async_step_account_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Manage the linked account's coupon-activation options."""
+        if user_input is not None:
+            raw_cookie = str(user_input.get(CONF_INSTORE_SESSION_COOKIE, "")).strip()
+            instore_cookie = (
+                normalize_instore_session_cookie(raw_cookie) if raw_cookie else ""
+            )
+            return self.async_create_entry(
+                title="",
+                data={
+                    **self._config_entry.options,
+                    CONF_AUTO_ACTIVATE_FREE_COUPONS: user_input[
+                        CONF_AUTO_ACTIVATE_FREE_COUPONS
+                    ],
+                    CONF_INSTORE_SESSION_COOKIE: instore_cookie,
+                },
+            )
+
+        current = {**self._config_entry.data, **self._config_entry.options}
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_AUTO_ACTIVATE_FREE_COUPONS,
+                    default=current.get(
+                        CONF_AUTO_ACTIVATE_FREE_COUPONS,
+                        DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_INSTORE_SESSION_COOKIE,
+                    default=current.get(CONF_INSTORE_SESSION_COOKIE, ""),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            }
+        )
+
+        return self.async_show_form(step_id="account_settings", data_schema=schema)
+
+    async def async_step_link_account(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Link a Kaufland account to this store entry (grouped together)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            code = extract_code_from_input(user_input["redirect_url"])
+            session = async_get_clientsession(self.hass)
+            auth = KauflandAuth(session)
+
+            try:
+                tokens = await auth.exchange_code(code, self._code_verifier or "")
+            except KauflandAuthError as exc:
+                _LOGGER.error("Kaufland account login failed: %s", exc)
+                errors["base"] = "auth_failed"
+            else:
+                new_data = {
+                    **self._config_entry.data,
+                    CONF_ACCOUNT_EMAIL: tokens.get("email"),
+                    CONF_ACCESS_TOKEN: tokens["access_token"],
+                    CONF_REFRESH_TOKEN: tokens["refresh_token"],
+                    CONF_TOKEN_EXPIRES_AT: tokens["expires_at"],
+                }
+                new_options = {
+                    **self._config_entry.options,
+                    CONF_AUTO_ACTIVATE_FREE_COUPONS: DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
+                }
+                # async_update_entry schedules the entry's update listener
+                # (_async_update_options), which reloads it - the new
+                # account coordinator/sensors/button show up on this same
+                # entry/device set once that reload completes.
+                self.hass.config_entries.async_update_entry(
+                    self._config_entry, data=new_data, options=new_options
+                )
+                return self.async_abort(reason="account_linked")
+
+        if self._code_verifier is None:
+            self._code_verifier, code_challenge = generate_pkce_pair()
+            self._state = generate_state()
+            self._authorize_url = build_authorize_url(
+                state=self._state, code_challenge=code_challenge
+            )
+
+        return self.async_show_form(
+            step_id="link_account",
+            data_schema=vol.Schema({vol.Required("redirect_url"): str}),
+            description_placeholders={"authorize_url": self._authorize_url},
+            errors=errors,
+        )
 
 
 class KauflandAccountOptionsFlowHandler(config_entries.OptionsFlow):
