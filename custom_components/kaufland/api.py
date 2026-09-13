@@ -251,7 +251,20 @@ class KauflandAPIClient:
                 category_name = category.get("displayName") or category.get("name") or ""
                 category_color = category.get("colorCode")
                 for offer in category.get("offers", []):
-                    title = (offer.get("title") or offer.get("detailTitle") or "").strip()
+                    # For most offers ``title`` already is the full product
+                    # name (``subtitle`` is null). For branded articles
+                    # (e.g. house brands like "PARKSIDE®"), ``title`` is only
+                    # the brand/manufacturer and the actual article name is
+                    # in the separate ``subtitle`` field - combine both so
+                    # the offer isn't just labelled with the brand name.
+                    brand_or_name = (
+                        offer.get("title") or offer.get("detailTitle") or ""
+                    ).strip()
+                    article_name = (offer.get("subtitle") or "").strip()
+                    if article_name and article_name.lower() not in brand_or_name.lower():
+                        title = f"{brand_or_name} {article_name}".strip()
+                    else:
+                        title = brand_or_name
                     if not title:
                         continue
                     discount = offer.get("discount")
