@@ -44,4 +44,3 @@ ATTR_ACTIVATED_COUPONS = "activated_coupons"
 ATTR_LAST_ACTIVATION_ERROR = "last_activation_error"
 
 ISSUE_ID_ACCOUNT_REAUTH = "account_reauth_required"
-ISSUE_ID_INSTORE_COOKIE_INVALID = "instore_cookie_invalid"

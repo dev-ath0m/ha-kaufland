@@ -31,10 +31,9 @@ async def async_setup_entry(
         entities: list[Any] = [
             KauflandAvailableCouponsSensor(coordinator),
             KauflandCouponsSensor(coordinator),
+            KauflandAvailableInstoreCouponsSensor(coordinator),
+            KauflandActiveInstoreCouponsSensor(coordinator),
         ]
-        if coordinator.instore_session_cookie:
-            entities.append(KauflandAvailableInstoreCouponsSensor(coordinator))
-            entities.append(KauflandActiveInstoreCouponsSensor(coordinator))
         async_add_entities(entities, update_before_add=False)
         return
 
@@ -366,16 +365,12 @@ class KauflandAvailableInstoreCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
     """Represents in-store/regular Kaufland Card XTRA coupons that are
-    available to activate (``status == "inactive"``).
+    available to activate (``status == 0``).
 
-    Experimental & opt-in: only created when the user has manually supplied
-    an ``ALTSESSID`` session cookie value in the account options - this
-    integration never obtains or forges that cookie itself, the user must
-    copy it from their own already logged-in browser session on
-    kaufland.de. It expires periodically and will need to be refreshed
-    there when an ``instore_cookie_invalid`` repair issue appears. Field
-    names/values (``status`` is the *string* "active"/"inactive", points
-    field is ``loyalty_points``) were confirmed live on 2026-09-13.
+    Confirmed live 2026-09: fetched via a separate "loyalty" API
+    (``app.kaufland.net``) that, unlike marketplace coupons, only needs the
+    OAuth bearer token - no session cookie. Field names/values match the
+    marketplace schema (integer ``status``, camelCase ``loyaltyPoints``).
     """
 
     _attr_icon = "mdi:ticket-outline"
@@ -404,17 +399,17 @@ class KauflandAvailableInstoreCouponsSensor(
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("instore_coupons", [])
-        return len([c for c in coupons if c.get("status") == "inactive"])
+        return len([c for c in coupons if c.get("status") == 0])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the full list of available in-store coupons, split free vs. points."""
         data = self.coordinator.data or {}
         coupons = [
-            c for c in data.get("instore_coupons", []) if c.get("status") == "inactive"
+            c for c in data.get("instore_coupons", []) if c.get("status") == 0
         ]
-        free_coupons = [c for c in coupons if not c.get("loyalty_points")]
-        points_coupons = [c for c in coupons if c.get("loyalty_points")]
+        free_coupons = [c for c in coupons if not c.get("loyaltyPoints")]
+        points_coupons = [c for c in coupons if c.get("loyaltyPoints")]
         return {
             "account_email": self.coordinator.account_email,
             "coupons": coupons,
@@ -426,20 +421,15 @@ class KauflandAvailableInstoreCouponsSensor(
 
     @property
     def available(self) -> bool:
-        """Return True if coordinator has data and in-store tracking is configured."""
-        return self.coordinator.data is not None and bool(
-            self.coordinator.instore_session_cookie
-        )
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
 
 
 class KauflandActiveInstoreCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
     """Represents in-store/regular Kaufland Card XTRA coupons that have
-    already been activated (``status == "active"``).
-
-    Experimental & opt-in - see ``KauflandAvailableInstoreCouponsSensor``
-    docstring for details on the required manually-supplied session cookie.
+    already been activated (``status != 0``).
     """
 
     _attr_icon = "mdi:ticket-percent"
@@ -468,25 +458,26 @@ class KauflandActiveInstoreCouponsSensor(
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("instore_coupons", [])
-        return sum(1 for c in coupons if c.get("status") == "active")
+        return sum(1 for c in coupons if c.get("status") != 0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return in-store coupon details."""
+        """Return in-store coupon details and last auto-activation results."""
         data = self.coordinator.data or {}
         return {
             "account_email": self.coordinator.account_email,
+            "auto_activate_free_coupons": self.coordinator.auto_activate_free_coupons,
             "coupons": data.get("instore_coupons", []),
+            "activated_this_cycle": data.get("instore_activated_this_cycle", []),
+            "last_activation_error": data.get("instore_last_activation_error"),
             "fetch_error": data.get("instore_fetch_error"),
             ATTR_ATTRIBUTION: ATTRIBUTION,
         }
 
     @property
     def available(self) -> bool:
-        """Return True if coordinator has data and in-store tracking is configured."""
-        return self.coordinator.data is not None and bool(
-            self.coordinator.instore_session_cookie
-        )
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
 
 
 def coordinator_email(coordinator: KauflandCouponsCoordinator) -> str | None:

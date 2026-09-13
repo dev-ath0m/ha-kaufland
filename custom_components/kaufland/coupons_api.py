@@ -22,6 +22,7 @@ import logging
 import re
 import secrets
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -35,6 +36,17 @@ CIDAAS_REDIRECT_URI = "com.kaufland.kaufland://oauth/callback/marketplace"
 CIDAAS_SCOPES = "openid profile email offline_access"
 
 COUPONS_API_BASE_URL = "https://shop-mobile-bff.cloud.kaufland.de"
+
+# Kaufland Card XTRA in-store/loyalty coupons live behind a completely
+# different backend than marketplace coupons (found by decompiling the
+# Android app - the older shop-mobile-bff `/coupons` endpoint used to be
+# tried here requires a session cookie even for read access and there is
+# no way to tell real, currently-activatable coupons apart from inactive
+# "Deal des Tages" style previews via that feed). This one only needs the
+# OAuth bearer token plus a `countryCode` header and exposes a
+# `buttonActive` flag that reliably identifies real, activatable coupons.
+# Confirmed live 2026-09.
+LOYALTY_API_BASE_URL = "https://app.kaufland.net"
 
 
 class KauflandAuthError(Exception):
@@ -194,33 +206,74 @@ class KauflandCouponsClient:
         except aiohttp.ClientError as exc:
             raise KauflandCouponsApiError(f"Kaufland coupons request failed: {exc}") from exc
 
-    async def get_instore_coupons(self, session_cookie: str) -> dict[str, Any]:
-        """Return the raw in-store/regular Kaufland Card XTRA coupons payload.
+    async def get_loyalty_coupons(self, country: str = "DE") -> dict[str, Any]:
+        """Return the raw loyalty coupons payload (in-store + marketplace).
 
-        Unlike marketplace coupons, this endpoint rejects requests without a
-        session cookie (``ALTSESSID``) even for read access. This
-        integration never obtains or forges that cookie itself - the user
-        must copy it from their own, already logged-in browser session on
-        kaufland.de and paste it into the account options
-        (``normalize_instore_session_cookie`` handles common paste shapes).
-
-        Experimental: the response shape has not been fully verified
-        against a live account yet, so callers should treat unknown fields
-        defensively.
+        This is the endpoint Kaufland's own app uses to list "Kaufland Card
+        XTRA" coupons (``storeCoupons`` are the in-store/regular ones,
+        ``marketplaceCoupons`` duplicate what ``get_marketplace_coupons``
+        already returns). It only needs the OAuth bearer token - no session
+        cookie required, unlike marketplace coupon *activation*.
         """
-        url = f"{COUPONS_API_BASE_URL}/coupons"
-        headers = {**self._headers(), "Cookie": f"ALTSESSID={session_cookie}"}
+        url = f"{LOYALTY_API_BASE_URL}/kapp/api/v1/loyalty/coupons"
+        headers = {**self._headers(), "countryCode": country}
         try:
             async with self._session.get(url, headers=headers) as resp:
                 body = await resp.text()
                 if resp.status != 200:
                     raise KauflandCouponsApiError(
-                        f"Kaufland in-store coupons request failed ({resp.status}): {body}"
+                        f"Kaufland loyalty coupons request failed ({resp.status}): {body}"
                     )
                 return json.loads(body)
         except aiohttp.ClientError as exc:
             raise KauflandCouponsApiError(
-                f"Kaufland in-store coupons request failed: {exc}"
+                f"Kaufland loyalty coupons request failed: {exc}"
+            ) from exc
+
+    async def activate_stationary_coupon(
+        self,
+        coupon_number: str,
+        exchange_rule_number: str | None = None,
+        country: str = "DE",
+    ) -> dict[str, Any]:
+        """Activate a single in-store (stationary) Kaufland Card XTRA coupon.
+
+        Confirmed live 2026-09: in-store coupons are *not* activated
+        through the marketplace ``/coupons/activate`` endpoint - that
+        returns a misleading "Coupon was already redeemed" error for
+        stationary coupon numbers, even ones never activated before.
+        Instead they go through an event-based modification API on a
+        different backend (``app.kaufland.net``), requiring only the OAuth
+        bearer token (no session cookie).
+        """
+        url = f"{LOYALTY_API_BASE_URL}/kapp/api/v1/loyalty/coupon/modify"
+        headers = {**self._headers(), "countryCode": country}
+        body = {
+            "Country": country,
+            "Events": [
+                {
+                    "EventType": 0,  # ACTIVATE
+                    "ExchangeRuleNumber": exchange_rule_number or "",
+                    "Gcn": coupon_number,
+                    "RedemptionPoint": "",
+                    "Timestamp": datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%S.000Z"
+                    ),
+                }
+            ],
+        }
+        try:
+            async with self._session.post(url, headers=headers, json=body) as resp:
+                text = await resp.text()
+                if resp.status not in (200, 201):
+                    raise KauflandCouponsApiError(
+                        f"Kaufland in-store coupon activation failed for "
+                        f"{coupon_number} ({resp.status}): {text}"
+                    )
+                return json.loads(text) if text else {}
+        except aiohttp.ClientError as exc:
+            raise KauflandCouponsApiError(
+                f"Kaufland in-store coupon activation failed for {coupon_number}: {exc}"
             ) from exc
 
     async def activate_coupon(
@@ -232,10 +285,12 @@ class KauflandCouponsClient:
         """Activate a single marketplace coupon by its coupon number (gcn).
 
         Confirmed live 2026-09: Kaufland's backend requires a session
-        cookie (``ALTSESSID``) for this endpoint, same as the in-store
-        coupons endpoint. If the user has supplied one (see
-        ``get_instore_coupons``), pass it here too - without it this call
-        reliably fails with ``400 Missing session cookie``.
+        cookie (``ALTSESSID``) for this endpoint. The user must supply one
+        via the account options (``normalize_instore_session_cookie``
+        handles common paste shapes) - without it this call reliably fails
+        with ``400 Missing session cookie``. Note this is unrelated to
+        in-store coupon activation, which uses a different backend that
+        needs only the OAuth bearer token (see ``activate_stationary_coupon``).
         """
         url = f"{COUPONS_API_BASE_URL}/coupons/activate"
         headers = self._headers()

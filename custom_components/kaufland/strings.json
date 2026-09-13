@@ -55,10 +55,10 @@
       },
       "account_init": {
         "title": "Configure Kaufland account",
-        "description": "Optional but recommended: paste a session cookie value below to (1) let this integration actually activate free marketplace coupons automatically (without it, activation always fails with 'Missing session cookie'), and (2) also track in-store/regular Kaufland Card XTRA coupons for read-only display. Log into https://www.kaufland.de in a normal browser, open Developer Tools \u2192 Application/Storage \u2192 Cookies, find the cookie named 'ALTSESSID', and copy its value here. This cookie is short-lived and you will need to come back and refresh it whenever a repair issue says it's expired. Leave blank to disable both features.",
+        "description": "Optional but recommended: paste a session cookie value below to let this integration actually activate free marketplace coupons automatically (without it, marketplace activation always fails with 'Missing session cookie'). In-store/regular Kaufland Card XTRA coupons are tracked and auto-activated without needing this cookie. Log into https://www.kaufland.de in a normal browser, open Developer Tools \u2192 Application/Storage \u2192 Cookies, find the cookie named 'ALTSESSID', and copy its value here. This cookie is short-lived and you will need to come back and refresh it whenever a repair issue says it's expired. Leave blank to disable marketplace auto-activation.",
         "data": {
           "auto_activate_free_coupons": "Automatically activate free Kaufland Card XTRA coupons (0 loyalty points)",
-          "instore_session_cookie": "Session cookie (ALTSESSID) - required for coupon activation and in-store coupons"
+          "instore_session_cookie": "Session cookie (ALTSESSID) - required for marketplace coupon activation"
         }
       }
     }
@@ -71,10 +71,6 @@
     "account_reauth_required": {
       "title": "Kaufland account needs to be relinked",
       "description": "The linked Kaufland account's login has expired or been revoked. Remove and re-add the account to keep auto-activating free coupons."
-    },
-    "instore_cookie_invalid": {
-      "title": "Kaufland in-store coupons session cookie expired",
-      "description": "The manually-provided in-store coupons session cookie (ALTSESSID) was rejected or has expired. Log into https://www.kaufland.de in a browser, copy a fresh 'ALTSESSID' cookie value, and update it in the account's options to resume in-store coupon tracking."
     }
   }
 }
