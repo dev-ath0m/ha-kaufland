@@ -301,7 +301,14 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 instore_payload = await client.get_instore_coupons(
                     self.instore_session_cookie
                 )
-                instore_coupons = instore_payload.get("coupons", [])
+                # This endpoint returns several coupon categories in one
+                # payload - only "stationary_coupons" are the in-store/
+                # regular Kaufland Card XTRA ones we're after here.
+                # Confirmed live 2026-09-13: status is the *string*
+                # "active"/"inactive" (not the marketplace endpoint's
+                # integer 0/non-0), and the points field is snake_case
+                # "loyalty_points".
+                instore_coupons = instore_payload.get("stationary_coupons", [])
                 if self._instore_issue_created:
                     ir.async_delete_issue(
                         self.hass, DOMAIN, ISSUE_ID_INSTORE_COOKIE_INVALID
