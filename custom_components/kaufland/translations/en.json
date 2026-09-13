@@ -71,6 +71,10 @@
     "account_reauth_required": {
       "title": "Kaufland account needs to be relinked",
       "description": "The linked Kaufland account's login has expired or been revoked. Remove and re-add the account to keep auto-activating free coupons."
+    },
+    "marketplace_cookie_invalid": {
+      "title": "Kaufland marketplace coupon activation session cookie expired",
+      "description": "The session cookie (ALTSESSID) used for marketplace coupon activation is missing or has expired. Log into https://www.kaufland.de in a browser, copy a fresh 'ALTSESSID' cookie value, and update it in the account's options to resume marketplace coupon activation."
     }
   }
 }
