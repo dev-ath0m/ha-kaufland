@@ -1,4 +1,4 @@
-"""Config flow for the Kaufland Weekly Offers integration."""
+"""Config flow for the Kaufland integration."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -15,17 +16,39 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .api import KauflandAPIClient, Store
 from .const import (
+    CONF_ACCESS_TOKEN,
+    CONF_ACCOUNT_EMAIL,
+    CONF_AUTO_ACTIVATE_FREE_COUPONS,
+    CONF_ENTRY_TYPE,
+    CONF_INSTORE_SESSION_COOKIE,
     CONF_PRODUCT_FILTERS,
+    CONF_REFRESH_TOKEN,
     CONF_STORE_CODE,
+    CONF_TOKEN_EXPIRES_AT,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    ENTRY_TYPE_ACCOUNT,
+    ENTRY_TYPE_STORE,
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
+)
+from .coupons_api import (
+    KauflandAuth,
+    KauflandAuthError,
+    build_authorize_url,
+    extract_code_from_input,
+    generate_pkce_pair,
+    generate_state,
+    normalize_instore_session_cookie,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,6 +63,9 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
         """Initialize config flow."""
         self._search_results: list[Store] = []
         self._discovery_data: dict[str, Any] = {}
+        self._code_verifier: str | None = None
+        self._state: str | None = None
+        self._authorize_url: str | None = None
 
     async def async_step_integration_discovery(
         self, discovery_info: dict[str, Any]
@@ -68,14 +94,26 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
             store_code = self._discovery_data.get(CONF_STORE_CODE, "")
             name = self._discovery_data.get("name") or store_code
             title = f"Kaufland {name}"
-            return self.async_create_entry(title=title, data=self._discovery_data)
+            return self.async_create_entry(
+                title=title,
+                data={**self._discovery_data, CONF_ENTRY_TYPE: ENTRY_TYPE_STORE},
+            )
 
         return self.async_show_form(step_id="discovery_confirm")
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Handle initial user step: search stores by postcode or city."""
+        """Handle initial step: choose what to set up."""
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["store_search", "link_account"],
+        )
+
+    async def async_step_store_search(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Search stores by postcode or city."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -103,7 +141,7 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
         )
 
         return self.async_show_form(
-            step_id="user",
+            step_id="store_search",
             data_schema=schema,
             errors=errors,
         )
@@ -127,6 +165,7 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
                 return self.async_create_entry(
                     title=f"Kaufland {store.title}",
                     data={
+                        CONF_ENTRY_TYPE: ENTRY_TYPE_STORE,
                         CONF_STORE_CODE: store.store_code,
                         "name": store.name,
                         "street": store.street,
@@ -159,17 +198,79 @@ class KauflandConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ign
             errors=errors,
         )
 
+    async def async_step_link_account(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show the Kaufland account login link the user must open in a browser."""
+        self._code_verifier, code_challenge = generate_pkce_pair()
+        self._state = generate_state()
+        self._authorize_url = build_authorize_url(
+            state=self._state, code_challenge=code_challenge
+        )
+
+        return self.async_show_form(
+            step_id="account_code",
+            data_schema=vol.Schema({vol.Required("redirect_url"): str}),
+            description_placeholders={"authorize_url": self._authorize_url},
+        )
+
+    async def async_step_account_code(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Exchange the pasted authorization code/redirect URL for tokens."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            code = extract_code_from_input(user_input["redirect_url"])
+            session = async_get_clientsession(self.hass)
+            auth = KauflandAuth(session)
+
+            try:
+                tokens = await auth.exchange_code(code, self._code_verifier or "")
+            except KauflandAuthError as exc:
+                _LOGGER.error("Kaufland account login failed: %s", exc)
+                errors["base"] = "auth_failed"
+            else:
+                email = tokens.get("email")
+                sub = tokens.get("sub")
+                await self.async_set_unique_id(f"kaufland_account_{sub or email}")
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=f"Kaufland account ({email})" if email else "Kaufland account",
+                    data={
+                        CONF_ENTRY_TYPE: ENTRY_TYPE_ACCOUNT,
+                        CONF_ACCOUNT_EMAIL: email,
+                        CONF_ACCESS_TOKEN: tokens["access_token"],
+                        CONF_REFRESH_TOKEN: tokens["refresh_token"],
+                        CONF_TOKEN_EXPIRES_AT: tokens["expires_at"],
+                    },
+                    options={
+                        CONF_AUTO_ACTIVATE_FREE_COUPONS: DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
+                    },
+                )
+
+        # Re-show the same form, with the same still-pending PKCE challenge,
+        # so the user can correct a mistyped/expired code.
+        return self.async_show_form(
+            step_id="account_code",
+            data_schema=vol.Schema({vol.Required("redirect_url"): str}),
+            description_placeholders={"authorize_url": self._authorize_url},
+            errors=errors,
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
-    ) -> KauflandOptionsFlowHandler:
+    ) -> config_entries.OptionsFlow:
         """Return options flow handler."""
+        if config_entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
+            return KauflandAccountOptionsFlowHandler(config_entry)
         return KauflandOptionsFlowHandler(config_entry)
 
 
 class KauflandOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for Kaufland."""
+    """Handle options flow for a Kaufland store entry."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
@@ -222,3 +323,58 @@ class KauflandOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=schema)
+
+
+class KauflandAccountOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for a linked Kaufland account entry."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Entry point for the account options flow (delegates to the form
+        actually shown, ``account_init``, so its submission is routed back
+        here correctly).
+        """
+        return await self.async_step_account_init(user_input)
+
+    async def async_step_account_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            raw_cookie = str(user_input.get(CONF_INSTORE_SESSION_COOKIE, "")).strip()
+            instore_cookie = normalize_instore_session_cookie(raw_cookie) if raw_cookie else ""
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_AUTO_ACTIVATE_FREE_COUPONS: user_input[
+                        CONF_AUTO_ACTIVATE_FREE_COUPONS
+                    ],
+                    CONF_INSTORE_SESSION_COOKIE: instore_cookie,
+                },
+            )
+
+        current = {**self._config_entry.data, **self._config_entry.options}
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_AUTO_ACTIVATE_FREE_COUPONS,
+                    default=current.get(
+                        CONF_AUTO_ACTIVATE_FREE_COUPONS,
+                        DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_INSTORE_SESSION_COOKIE,
+                    default=current.get(CONF_INSTORE_SESSION_COOKIE, ""),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            }
+        )
+
+        return self.async_show_form(step_id="account_init", data_schema=schema)
+
