@@ -237,14 +237,19 @@ class KauflandProductFilterSensor(
 class KauflandAvailableCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
-    """Represents Kaufland Card XTRA marketplace coupons that are available
-    to activate (fetched, not yet activated - ``status == 0``).
+    """Represents Kaufland Card XTRA *marketplace* coupons that are
+    available to activate (fetched, not yet activated - ``status == 0``).
+
+    Marketplace-only: Kaufland's separate in-store/regular Kaufland Card
+    XTRA coupons are not covered here - listing those requires a session
+    cookie (``ALTSESSID``) this integration intentionally does not try to
+    obtain (see the coordinator docstring / repo notes for details).
     """
 
     _attr_icon = "mdi:ticket-outline"
     _attr_native_unit_of_measurement = "coupons"
     _attr_has_entity_name = True
-    _attr_name = "Available Coupons"
+    _attr_name = "Available Marketplace Coupons"
     _unrecorded_attributes = frozenset({"coupons"})
 
     def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
@@ -296,21 +301,24 @@ class KauflandAvailableCouponsSensor(
 class KauflandCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
-    """Represents the linked Kaufland account's activated marketplace
+    """Represents the linked Kaufland account's activated *marketplace*
     coupons (``status != 0``).
 
-    Note: Kaufland's backend currently rejects coupon activation from a
-    plain API client (see ``KauflandCouponsCoordinator`` docstring), so this
-    will read 0 unless a coupon was activated another way (e.g. manually in
-    the Kaufland app) and that state is reflected by the marketplace
-    coupons API - it only tracks *marketplace* coupons, not the separate
-    in-store/regular Kaufland Card XTRA coupons shown elsewhere in the app.
+    Marketplace-only: this will read 0 unless a coupon was activated some
+    other way (e.g. manually in the Kaufland app) and that state happens to
+    be reflected by the marketplace coupons API - server-side activation
+    from a plain API client is currently rejected (see
+    ``KauflandCouponsCoordinator`` docstring). This sensor never reflects
+    the separate in-store/regular Kaufland Card XTRA coupons shown
+    elsewhere in the app - listing those requires a session cookie
+    (``ALTSESSID``) that has the same anti-automation protection and is
+    intentionally not something this integration tries to obtain.
     """
 
     _attr_icon = "mdi:ticket-percent"
     _attr_native_unit_of_measurement = "coupons"
     _attr_has_entity_name = True
-    _attr_name = "Active Coupons"
+    _attr_name = "Active Marketplace Coupons"
     _unrecorded_attributes = frozenset({"coupons"})
 
 
