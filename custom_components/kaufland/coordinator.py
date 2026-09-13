@@ -145,6 +145,13 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     Activation attempts are therefore expected to fail for now; failures are
     logged at debug level (see ``last_activation_error``) and coupons stay
     visible as pending so they can still be activated manually in the app.
+
+    Marketplace-only: this coordinator only fetches *marketplace* coupons
+    (``/coupons/marketplaceCoupons``). Kaufland's separate in-store/regular
+    Kaufland Card XTRA coupons live behind a different endpoint that
+    requires a session cookie (``ALTSESSID``) just to list them - the same
+    kind of WebView-derived session this integration won't try to forge -
+    so those are not available here at all, not even read-only.
     """
 
 
