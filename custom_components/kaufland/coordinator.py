@@ -139,30 +139,39 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     Coupons that require spending loyalty points (``loyaltyPoints`` > 0) are
     never auto-activated - only coupons with ``loyaltyPoints`` missing/0.
 
-    Known limitation: as of 2026-09, Kaufland's backend rejects coupon
-    activation from a plain API client with ``400 Missing session cookie``.
-    The official app satisfies this via a signed WebView session
-    (``OneWebSessionCookieReconciler``) behind Cloudflare bot-management,
-    which this integration intentionally does not attempt to replicate.
-    Activation attempts are therefore expected to fail for now; failures are
-    logged at debug level (see ``last_activation_error``) and coupons stay
-    visible as pending so they can still be activated manually in the app.
+    Activating a coupon requires a session cookie (``ALTSESSID``) in
+    addition to the OAuth bearer token - Kaufland's backend rejects
+    activation from a plain API client with ``400 Missing session cookie``
+    otherwise. This integration never obtains or forges that cookie itself;
+    the user must copy it from their own, already logged-in browser session
+    on kaufland.de and paste it into the account options
+    (``CONF_INSTORE_SESSION_COOKIE``). Confirmed live 2026-09: once that
+    cookie is supplied, marketplace coupon activation succeeds. Without it,
+    activation attempts fail and coupons stay visible as pending so they can
+    still be activated manually in the app (see ``last_activation_error``).
+
+    Not every entry in the marketplace coupons feed is a real, per-account
+    activatable coupon - some are plain product/"special offer" listings
+    mixed into the same feed. Kaufland's activate endpoint returns success
+    (``200``) for these too, without ever actually changing their status, so
+    this coordinator verifies the status actually changed (via a follow-up
+    fetch) before counting/reporting a coupon as activated, and remembers
+    non-activatable gcns for the lifetime of the coordinator to avoid
+    retrying them every update cycle.
 
     Marketplace-only by default: this coordinator only fetches *marketplace*
     coupons (``/coupons/marketplaceCoupons``). Kaufland's separate in-store/
     regular Kaufland Card XTRA coupons live behind a different endpoint that
-    requires a session cookie (``ALTSESSID``) just to list them - the same
-    kind of WebView-derived session this integration won't try to forge.
+    requires the same session cookie just to list them.
 
-    Optionally, if the user manually supplies that ``ALTSESSID`` cookie value
-    via the account options flow (``CONF_INSTORE_SESSION_COOKIE`` - copied by
-    the user themselves from an already logged-in browser session on
-    kaufland.de, never obtained or forged by this integration), this
-    coordinator will also fetch in-store coupons (``GET /coupons``) for
-    read-only display. This is opt-in, experimental, and will stop working
-    whenever that manually-supplied cookie expires until the user refreshes
-    it - a repair issue (``instore_cookie_invalid``) is raised when that
-    happens.
+    If the user has supplied that cookie, this coordinator also fetches
+    in-store coupons (``GET /coupons``) for read-only display. In-store
+    coupon *activation* is not implemented - it goes through a separate,
+    third-party backend Kaufland uses for its loyalty/CRM coupons, distinct
+    from the marketplace API this coordinator otherwise talks to. This is
+    opt-in and will stop working whenever the manually-supplied cookie
+    expires until the user refreshes it - a repair issue
+    (``instore_cookie_invalid``) is raised when that happens.
     """
 
 
@@ -184,6 +193,12 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._auth = KauflandAuth(self._session)
         self._issue_created = False
         self._instore_issue_created = False
+        # gcns where Kaufland's activate endpoint returned success (200) but
+        # the coupon's status never actually changed - these appear to be
+        # plain "special offer"/product-deal listings mixed into the same
+        # marketplace coupons feed, not real per-account activatable
+        # coupons. Remembered so we don't keep retrying them every cycle.
+        self._non_activatable_gcns: set[str] = set()
 
         super().__init__(
             hass,
@@ -246,25 +261,31 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if self.auto_activate_free_coupons:
             failed = 0
+            attempted: list[str] = []
             for coupon in coupons:
                 gcn = coupon.get("gcn")
                 if not gcn or coupon.get("status") != 0:
                     continue  # already activated, expired, or no id
                 if not self._is_free_to_activate(coupon):
                     continue  # costs loyalty points - never auto-activate
+                if gcn in self._non_activatable_gcns:
+                    continue  # confirmed non-activatable in a previous cycle
 
                 try:
-                    await client.activate_coupon(gcn, coupon.get("exchangeRuleNumber"))
-                    activated.append(gcn)
-                    _LOGGER.info("Kaufland: auto-activated free coupon %s", gcn)
+                    await client.activate_coupon(
+                        gcn,
+                        coupon.get("exchangeRuleNumber"),
+                        self.instore_session_cookie,
+                    )
+                    attempted.append(gcn)
                 except KauflandCouponsApiError as err:
-                    # Kaufland currently rejects server-side activation for
-                    # every account with "Missing session cookie" (the real
-                    # app relies on a browser/WebView session we can't and
-                    # shouldn't try to replicate). This is expected right
-                    # now, so keep it at debug level to avoid log spam - see
-                    # last_activation_error / the coupons attribute for
-                    # visibility instead of a warning every update cycle.
+                    # Activation requires the same session cookie as in-store
+                    # coupons (see class docstring). Without it - or if it
+                    # has expired - Kaufland rejects activation with "Missing
+                    # session cookie", so keep this at debug level to avoid
+                    # log spam; see last_activation_error / the coupons
+                    # attribute for visibility instead of a warning every
+                    # update cycle.
                     _LOGGER.debug(
                         "Kaufland: failed to auto-activate free coupon %s: %s",
                         gcn,
@@ -276,12 +297,12 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if failed:
                 _LOGGER.debug(
                     "Kaufland: %d free coupon(s) could not be auto-activated "
-                    "(Kaufland currently requires a browser session for "
-                    "activation); they remain visible as pending",
+                    "(requires the session cookie in account options); they "
+                    "remain visible as pending",
                     failed,
                 )
 
-            if activated:
+            if attempted:
                 try:
                     payload = await client.get_marketplace_coupons()
                     coupons = payload.get("coupons", [])
@@ -289,6 +310,31 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.debug(
                         "Kaufland: could not refresh coupons after activation: %s", err
                     )
+                else:
+                    # Kaufland's activate endpoint returns 200 even for some
+                    # marketplace listings that never actually change status
+                    # (plain "special offer" product deals mixed into the
+                    # same feed as real, per-account activatable coupons).
+                    # Only report/keep a coupon as activated if its status
+                    # actually changed - otherwise remember it as
+                    # non-activatable so it isn't retried every cycle.
+                    refreshed_by_gcn = {c.get("gcn"): c for c in coupons}
+                    for gcn in attempted:
+                        refreshed = refreshed_by_gcn.get(gcn)
+                        if refreshed is not None and refreshed.get("status") != 0:
+                            activated.append(gcn)
+                            _LOGGER.info(
+                                "Kaufland: auto-activated free coupon %s", gcn
+                            )
+                        else:
+                            self._non_activatable_gcns.add(gcn)
+                            _LOGGER.debug(
+                                "Kaufland: activation call for %s succeeded but "
+                                "its status did not change - treating it as a "
+                                "non-activatable listing (e.g. a special offer, "
+                                "not a real coupon) and will not retry it",
+                                gcn,
+                            )
 
         if self._issue_created:
             ir.async_delete_issue(self.hass, DOMAIN, ISSUE_ID_ACCOUNT_REAUTH)

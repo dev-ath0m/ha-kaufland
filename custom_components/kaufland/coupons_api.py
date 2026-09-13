@@ -223,16 +223,31 @@ class KauflandCouponsClient:
                 f"Kaufland in-store coupons request failed: {exc}"
             ) from exc
 
-    async def activate_coupon(self, coupon_number: str, exchange_rule_number: str | None) -> dict[str, Any]:
-        """Activate a single marketplace coupon by its coupon number (gcn)."""
+    async def activate_coupon(
+        self,
+        coupon_number: str,
+        exchange_rule_number: str | None,
+        session_cookie: str | None = None,
+    ) -> dict[str, Any]:
+        """Activate a single marketplace coupon by its coupon number (gcn).
+
+        Confirmed live 2026-09: Kaufland's backend requires a session
+        cookie (``ALTSESSID``) for this endpoint, same as the in-store
+        coupons endpoint. If the user has supplied one (see
+        ``get_instore_coupons``), pass it here too - without it this call
+        reliably fails with ``400 Missing session cookie``.
+        """
         url = f"{COUPONS_API_BASE_URL}/coupons/activate"
+        headers = self._headers()
+        if session_cookie:
+            headers["Cookie"] = f"ALTSESSID={session_cookie}"
         body = {
             "coupon_number": coupon_number,
             "exchange_rule_number": exchange_rule_number,
         }
         try:
             async with self._session.post(
-                url, headers=self._headers(), json=body
+                url, headers=headers, json=body
             ) as resp:
                 text = await resp.text()
                 if resp.status not in (200, 201):
