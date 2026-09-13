@@ -12,11 +12,20 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .const import CONF_STORE_CODE, DISCOVERY_RADIUS_KM, DOMAIN, PLATFORMS
-from .coordinator import KauflandDataUpdateCoordinator
+from .const import (
+    CONF_ENTRY_TYPE,
+    CONF_STORE_CODE,
+    DISCOVERY_RADIUS_KM,
+    DOMAIN,
+    ENTRY_TYPE_ACCOUNT,
+    PLATFORMS,
+)
+from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+ACCOUNT_PLATFORMS = ["sensor"]
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -143,13 +152,23 @@ async def _async_discover_stores(hass: core.HomeAssistant) -> None:
 async def async_setup_entry(
     hass: core.HomeAssistant, entry: config_entries.ConfigEntry
 ) -> bool:
-    """Set up Kaufland Weekly Offers from a config entry."""
+    """Set up a Kaufland config entry (either a store or a linked account)."""
+    hass.data.setdefault(DOMAIN, {})
+
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
+        return await _async_setup_account_entry(hass, entry)
+    return await _async_setup_store_entry(hass, entry)
+
+
+async def _async_setup_store_entry(
+    hass: core.HomeAssistant, entry: config_entries.ConfigEntry
+) -> bool:
+    """Set up a Kaufland Weekly Offers store entry."""
     _LOGGER.debug(
         "Setting up Kaufland Weekly Offers entry: %s (store_code: %s)",
         entry.entry_id,
         entry.data.get(CONF_STORE_CODE),
     )
-    hass.data.setdefault(DOMAIN, {})
 
     coordinator = KauflandDataUpdateCoordinator(hass, entry)
     await coordinator.async_load_cache()
@@ -181,6 +200,30 @@ async def async_setup_entry(
     return True
 
 
+async def _async_setup_account_entry(
+    hass: core.HomeAssistant, entry: config_entries.ConfigEntry
+) -> bool:
+    """Set up a linked Kaufland account entry (coupon auto-activation)."""
+    _LOGGER.debug("Setting up Kaufland account entry: %s", entry.entry_id)
+
+    coordinator = KauflandCouponsCoordinator(hass, entry)
+
+    hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except UpdateFailed as err:
+        raise ConfigEntryNotReady(
+            f"Cannot connect to Kaufland account {coordinator.account_email}: {err}"
+        ) from err
+
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
+
+    await hass.config_entries.async_forward_entry_setups(entry, ACCOUNT_PLATFORMS)
+
+    return True
+
+
 async def _async_update_options(
     hass: core.HomeAssistant, entry: config_entries.ConfigEntry
 ) -> None:
@@ -192,7 +235,12 @@ async def async_unload_entry(
     hass: core.HomeAssistant, entry: config_entries.ConfigEntry
 ) -> bool:
     """Unload a Kaufland config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    platforms = (
+        ACCOUNT_PLATFORMS
+        if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT
+        else PLATFORMS
+    )
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, platforms)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok

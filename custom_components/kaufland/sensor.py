@@ -1,4 +1,4 @@
-"""Kaufland Weekly Offers sensor platform."""
+"""Kaufland sensor platform."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ATTRIBUTION, DOMAIN
-from .coordinator import KauflandDataUpdateCoordinator
+from .const import ATTRIBUTION, CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_ACCOUNT
+from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,8 +24,14 @@ async def async_setup_entry(
     entry: config_entries.ConfigEntry,
     async_add_entities: Any,
 ) -> None:
-    """Set up Kaufland Weekly Offers sensors from a config entry."""
-    coordinator: KauflandDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    """Set up Kaufland sensors from a config entry."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
+        async_add_entities(
+            [KauflandCouponsSensor(coordinator)], update_before_add=False
+        )
+        return
 
     entities: list[Any] = [KauflandOffersSensor(coordinator)]
 
@@ -222,3 +228,58 @@ class KauflandProductFilterSensor(
     def available(self) -> bool:
         """Return True if coordinator has data."""
         return self.coordinator.data is not None
+
+
+class KauflandCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Represents the linked Kaufland account's marketplace coupons."""
+
+    _attr_icon = "mdi:ticket-percent"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Active Coupons"
+    _unrecorded_attributes = frozenset({"coupons"})
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = f"kaufland_account_{self._account_email}_coupons"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of activated (status != 0) coupons."""
+        if not self.coordinator.data:
+            return None
+        coupons = self.coordinator.data.get("coupons", [])
+        return sum(1 for c in coupons if c.get("status") != 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return coupon details and last auto-activation results."""
+        data = self.coordinator.data or {}
+        return {
+            "account_email": self.coordinator.account_email,
+            "auto_activate_free_coupons": self.coordinator.auto_activate_free_coupons,
+            "coupons": data.get("coupons", []),
+            "activated_this_cycle": data.get("activated_this_cycle", []),
+            "last_activation_error": data.get("last_activation_error"),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+def coordinator_email(coordinator: KauflandCouponsCoordinator) -> str | None:
+    """Return the linked account's email for display in sensor attributes."""
+    return coordinator.account_email

@@ -1,8 +1,15 @@
 {
   "config": {
-    "flow_title": "Setup Kaufland weekly offers",
+    "flow_title": "Setup Kaufland",
     "step": {
       "user": {
+        "title": "Set up Kaufland",
+        "menu_options": {
+          "store_search": "Add a store (weekly offers, no login)",
+          "link_account": "Link a Kaufland account (auto-activate free coupons)"
+        }
+      },
+      "store_search": {
         "description": "Type your city or postal code to search for nearby Kaufland stores. No Kaufland account or login is required.",
         "data": {
           "search_query": "City or Postal Code"
@@ -17,15 +24,23 @@
       "discovery_confirm": {
         "title": "Kaufland store found nearby",
         "description": "A Kaufland store was discovered near your Home Assistant location:\n\n**{name}**\n{address}, {city}\n\nWould you like to add it?"
+      },
+      "account_code": {
+        "title": "Link your Kaufland account",
+        "description": "1. Open this link in a browser and log in with your Kaufland account:\n\n{authorize_url}\n\n2. After logging in, the page will fail to load (\"page not found\" or similar) - this is expected. Copy the full URL from your browser's address bar and paste it below.",
+        "data": {
+          "redirect_url": "Redirect URL (or just the 'code' from it)"
+        }
       }
     },
     "abort": {
-      "already_configured": "This Kaufland store is already configured.",
+      "already_configured": "This Kaufland store/account is already configured.",
       "no_stores_found": "No Kaufland stores found matching your query."
     },
     "error": {
       "search_failed": "Failed to query the Kaufland store finder.",
       "no_stores_found": "No Kaufland stores found matching your query. Please try another search.",
+      "auth_failed": "Could not exchange the provided code for a Kaufland login - please try again with a fresh link.",
       "unknown": "Unknown error occurred."
     }
   },
@@ -37,6 +52,12 @@
           "update_interval": "Update Interval (hours, min 1, max 168)",
           "product_filters": "Product filters (keywords to monitor for offers)"
         }
+      },
+      "account_init": {
+        "title": "Configure Kaufland account",
+        "data": {
+          "auto_activate_free_coupons": "Automatically activate free Kaufland Card XTRA coupons (0 loyalty points)"
+        }
       }
     }
   },
@@ -44,6 +65,11 @@
     "connection_error": {
       "title": "Error communicating with Kaufland",
       "description": "The integration is unable to fetch offers. Please check the logs."
+    },
+    "account_reauth_required": {
+      "title": "Kaufland account needs to be relinked",
+      "description": "The linked Kaufland account's login has expired or been revoked. Remove and re-add the account to keep auto-activating free coupons."
     }
   }
 }
+
