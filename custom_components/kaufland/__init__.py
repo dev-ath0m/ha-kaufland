@@ -25,7 +25,7 @@ from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinat
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-ACCOUNT_PLATFORMS = ["sensor"]
+ACCOUNT_PLATFORMS = ["sensor", "button"]
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

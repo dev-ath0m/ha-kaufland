@@ -32,6 +32,7 @@ from .const import (
     DOMAIN,
     ISSUE_ID_ACCOUNT_REAUTH,
     ISSUE_ID_CONNECTION,
+    ISSUE_ID_MARKETPLACE_COOKIE_INVALID,
     MIN_UPDATE_INTERVAL,
 )
 from .coupons_api import (
@@ -187,6 +188,7 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._session = async_get_clientsession(hass)
         self._auth = KauflandAuth(self._session)
         self._issue_created = False
+        self._marketplace_cookie_issue_created = False
         # gcns where Kaufland's activate endpoint returned success (200) but
         # the coupon's status never actually changed - these appear to be
         # plain "special offer"/product-deal listings mixed into the same
@@ -257,6 +259,7 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if self.auto_activate_free_coupons:
             failed = 0
+            cookie_error = False
             attempted: list[str] = []
             for coupon in coupons:
                 gcn = coupon.get("gcn")
@@ -281,7 +284,9 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # session cookie", so keep this at debug level to avoid
                     # log spam; see last_activation_error / the coupons
                     # attribute for visibility instead of a warning every
-                    # update cycle.
+                    # update cycle. A repair issue is raised instead (see
+                    # below) so the user is proactively notified once,
+                    # rather than on every update cycle.
                     _LOGGER.debug(
                         "Kaufland: failed to auto-activate free coupon %s: %s",
                         gcn,
@@ -289,6 +294,8 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     last_activation_error = str(err)
                     failed += 1
+                    if "session cookie" in str(err).lower():
+                        cookie_error = True
 
             if failed:
                 _LOGGER.debug(
@@ -297,6 +304,31 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "remain visible as pending",
                     failed,
                 )
+
+            # There is no way to automatically refresh the ALTSESSID session
+            # cookie - it's a short-lived, HMAC-signed WebView session that
+            # must go through Kaufland's real login + anti-bot flow in a
+            # real browser (see repo notes). Proactively surface a repair
+            # issue instead so the user knows to paste a fresh one in the
+            # account options, rather than silently failing every cycle.
+            if cookie_error:
+                if not self._marketplace_cookie_issue_created:
+                    ir.async_create_issue(
+                        self.hass,
+                        DOMAIN,
+                        ISSUE_ID_MARKETPLACE_COOKIE_INVALID,
+                        is_fixable=False,
+                        severity=ir.IssueSeverity.WARNING,
+                        translation_key="marketplace_cookie_invalid",
+                    )
+                    self._marketplace_cookie_issue_created = True
+            elif attempted and self._marketplace_cookie_issue_created:
+                # At least one activation call was accepted (no cookie
+                # error) - the cookie is valid again.
+                ir.async_delete_issue(
+                    self.hass, DOMAIN, ISSUE_ID_MARKETPLACE_COOKIE_INVALID
+                )
+                self._marketplace_cookie_issue_created = False
 
             if attempted:
                 try:
@@ -425,4 +457,22 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "instore_last_activation_error": instore_last_activation_error,
             "instore_fetch_error": instore_fetch_error,
         }
+
+    async def async_activate_all_now(self) -> None:
+        """Immediately attempt to activate every free, pending coupon.
+
+        Used by the "Activate All Coupons" button for on-demand activation
+        outside the normal polling interval - runs the exact same
+        fetch-activate-verify logic as a scheduled update (marketplace and
+        in-store), temporarily forcing activation on for this one refresh
+        even if the "Automatically activate free coupons" option is
+        disabled (a manual button press is an explicit request to
+        activate, so it should work regardless of that setting).
+        """
+        previous = self.auto_activate_free_coupons
+        self.auto_activate_free_coupons = True
+        try:
+            await self.async_request_refresh()
+        finally:
+            self.auto_activate_free_coupons = previous
 
