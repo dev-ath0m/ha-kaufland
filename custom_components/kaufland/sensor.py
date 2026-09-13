@@ -29,7 +29,11 @@ async def async_setup_entry(
 
     if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
         async_add_entities(
-            [KauflandCouponsSensor(coordinator)], update_before_add=False
+            [
+                KauflandAvailableCouponsSensor(coordinator),
+                KauflandCouponsSensor(coordinator),
+            ],
+            update_before_add=False,
         )
         return
 
@@ -230,16 +234,85 @@ class KauflandProductFilterSensor(
         return self.coordinator.data is not None
 
 
+class KauflandAvailableCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Represents Kaufland Card XTRA marketplace coupons that are available
+    to activate (fetched, not yet activated - ``status == 0``).
+    """
+
+    _attr_icon = "mdi:ticket-outline"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Available Coupons"
+    _unrecorded_attributes = frozenset({"coupons"})
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = f"kaufland_account_{self._account_email}_available_coupons"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @staticmethod
+    def _pending_coupons(coupons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return coupons that are still available to activate (status 0)."""
+        return [c for c in coupons if c.get("status") == 0]
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of coupons available to activate."""
+        if not self.coordinator.data:
+            return None
+        coupons = self.coordinator.data.get("coupons", [])
+        return len(self._pending_coupons(coupons))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the full list of available coupons, split free vs. points."""
+        data = self.coordinator.data or {}
+        coupons = self._pending_coupons(data.get("coupons", []))
+        free_coupons = [c for c in coupons if not c.get("loyaltyPoints")]
+        points_coupons = [c for c in coupons if c.get("loyaltyPoints")]
+        return {
+            "account_email": self.coordinator.account_email,
+            "coupons": coupons,
+            "free_coupon_count": len(free_coupons),
+            "points_required_coupon_count": len(points_coupons),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
 class KauflandCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
-    """Represents the linked Kaufland account's marketplace coupons."""
+    """Represents the linked Kaufland account's activated marketplace
+    coupons (``status != 0``).
+
+    Note: Kaufland's backend currently rejects coupon activation from a
+    plain API client (see ``KauflandCouponsCoordinator`` docstring), so this
+    will read 0 unless a coupon was activated another way (e.g. manually in
+    the Kaufland app) and that state is reflected by the marketplace
+    coupons API - it only tracks *marketplace* coupons, not the separate
+    in-store/regular Kaufland Card XTRA coupons shown elsewhere in the app.
+    """
 
     _attr_icon = "mdi:ticket-percent"
     _attr_native_unit_of_measurement = "coupons"
     _attr_has_entity_name = True
     _attr_name = "Active Coupons"
     _unrecorded_attributes = frozenset({"coupons"})
+
 
     def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
         """Initialize sensor."""
