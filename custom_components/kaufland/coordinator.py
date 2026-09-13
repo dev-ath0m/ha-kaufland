@@ -136,7 +136,17 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     Coupons that require spending loyalty points (``loyaltyPoints`` > 0) are
     never auto-activated - only coupons with ``loyaltyPoints`` missing/0.
+
+    Known limitation: as of 2026-09, Kaufland's backend rejects coupon
+    activation from a plain API client with ``400 Missing session cookie``.
+    The official app satisfies this via a signed WebView session
+    (``OneWebSessionCookieReconciler``) behind Cloudflare bot-management,
+    which this integration intentionally does not attempt to replicate.
+    Activation attempts are therefore expected to fail for now; failures are
+    logged at debug level (see ``last_activation_error``) and coupons stay
+    visible as pending so they can still be activated manually in the app.
     """
+
 
     config_entry: config_entries.ConfigEntry
 
@@ -213,6 +223,7 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         last_activation_error: str | None = None
 
         if self.auto_activate_free_coupons:
+            failed = 0
             for coupon in coupons:
                 gcn = coupon.get("gcn")
                 if not gcn or coupon.get("status") != 0:
@@ -225,12 +236,28 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     activated.append(gcn)
                     _LOGGER.info("Kaufland: auto-activated free coupon %s", gcn)
                 except KauflandCouponsApiError as err:
-                    _LOGGER.warning(
+                    # Kaufland currently rejects server-side activation for
+                    # every account with "Missing session cookie" (the real
+                    # app relies on a browser/WebView session we can't and
+                    # shouldn't try to replicate). This is expected right
+                    # now, so keep it at debug level to avoid log spam - see
+                    # last_activation_error / the coupons attribute for
+                    # visibility instead of a warning every update cycle.
+                    _LOGGER.debug(
                         "Kaufland: failed to auto-activate free coupon %s: %s",
                         gcn,
                         err,
                     )
                     last_activation_error = str(err)
+                    failed += 1
+
+            if failed:
+                _LOGGER.debug(
+                    "Kaufland: %d free coupon(s) could not be auto-activated "
+                    "(Kaufland currently requires a browser session for "
+                    "activation); they remain visible as pending",
+                    failed,
+                )
 
             if activated:
                 try:
