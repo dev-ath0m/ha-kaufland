@@ -366,18 +366,16 @@ class KauflandAvailableInstoreCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
     """Represents in-store/regular Kaufland Card XTRA coupons that are
-    available to activate (``status == 0``).
+    available to activate (``status == "inactive"``).
 
     Experimental & opt-in: only created when the user has manually supplied
     an ``ALTSESSID`` session cookie value in the account options - this
     integration never obtains or forges that cookie itself, the user must
     copy it from their own already logged-in browser session on
     kaufland.de. It expires periodically and will need to be refreshed
-    there when an ``instore_cookie_invalid`` repair issue appears. The
-    response field names used here (``status``, ``loyaltyPoints``) mirror
-    the marketplace coupons schema and have not yet been fully verified
-    against a live account - they may need adjusting once real data is
-    confirmed.
+    there when an ``instore_cookie_invalid`` repair issue appears. Field
+    names/values (``status`` is the *string* "active"/"inactive", points
+    field is ``loyalty_points``) were confirmed live on 2026-09-13.
     """
 
     _attr_icon = "mdi:ticket-outline"
@@ -406,16 +404,22 @@ class KauflandAvailableInstoreCouponsSensor(
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("instore_coupons", [])
-        return len([c for c in coupons if c.get("status") == 0])
+        return len([c for c in coupons if c.get("status") == "inactive"])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the full list of available in-store coupons."""
+        """Return the full list of available in-store coupons, split free vs. points."""
         data = self.coordinator.data or {}
-        coupons = [c for c in data.get("instore_coupons", []) if c.get("status") == 0]
+        coupons = [
+            c for c in data.get("instore_coupons", []) if c.get("status") == "inactive"
+        ]
+        free_coupons = [c for c in coupons if not c.get("loyalty_points")]
+        points_coupons = [c for c in coupons if c.get("loyalty_points")]
         return {
             "account_email": self.coordinator.account_email,
             "coupons": coupons,
+            "free_coupon_count": len(free_coupons),
+            "points_required_coupon_count": len(points_coupons),
             "fetch_error": data.get("instore_fetch_error"),
             ATTR_ATTRIBUTION: ATTRIBUTION,
         }
@@ -432,11 +436,10 @@ class KauflandActiveInstoreCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
     """Represents in-store/regular Kaufland Card XTRA coupons that have
-    already been activated (``status != 0``).
+    already been activated (``status == "active"``).
 
     Experimental & opt-in - see ``KauflandAvailableInstoreCouponsSensor``
-    docstring for details on the required manually-supplied session cookie
-    and the caveats around unverified response field names.
+    docstring for details on the required manually-supplied session cookie.
     """
 
     _attr_icon = "mdi:ticket-percent"
@@ -465,7 +468,7 @@ class KauflandActiveInstoreCouponsSensor(
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("instore_coupons", [])
-        return sum(1 for c in coupons if c.get("status") != 0)
+        return sum(1 for c in coupons if c.get("status") == "active")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
