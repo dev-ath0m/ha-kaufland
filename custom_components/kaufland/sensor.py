@@ -1,4 +1,4 @@
-"""Kaufland Weekly Offers sensor platform."""
+"""Kaufland sensor platform."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ATTRIBUTION, DOMAIN
-from .coordinator import KauflandDataUpdateCoordinator
+from .const import ATTRIBUTION, CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_ACCOUNT
+from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,8 +24,18 @@ async def async_setup_entry(
     entry: config_entries.ConfigEntry,
     async_add_entities: Any,
 ) -> None:
-    """Set up Kaufland Weekly Offers sensors from a config entry."""
-    coordinator: KauflandDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    """Set up Kaufland sensors from a config entry."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
+        entities: list[Any] = [
+            KauflandAvailableCouponsSensor(coordinator),
+            KauflandCouponsSensor(coordinator),
+            KauflandAvailableInstoreCouponsSensor(coordinator),
+            KauflandActiveInstoreCouponsSensor(coordinator),
+        ]
+        async_add_entities(entities, update_before_add=False)
+        return
 
     entities: list[Any] = [KauflandOffersSensor(coordinator)]
 
@@ -222,3 +232,254 @@ class KauflandProductFilterSensor(
     def available(self) -> bool:
         """Return True if coordinator has data."""
         return self.coordinator.data is not None
+
+
+class KauflandAvailableCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Represents Kaufland Card XTRA *marketplace* coupons that are
+    available to activate (fetched, not yet activated - ``status == 0``).
+
+    Marketplace-only: Kaufland's separate in-store/regular Kaufland Card
+    XTRA coupons are not covered here - listing those requires a session
+    cookie (``ALTSESSID``) this integration intentionally does not try to
+    obtain (see the coordinator docstring / repo notes for details).
+    """
+
+    _attr_icon = "mdi:ticket-outline"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Available Marketplace Coupons"
+    _unrecorded_attributes = frozenset({"coupons"})
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = f"kaufland_account_{self._account_email}_available_coupons"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @staticmethod
+    def _pending_coupons(coupons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return coupons that are still available to activate (status 0)."""
+        return [c for c in coupons if c.get("status") == 0]
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of coupons available to activate."""
+        if not self.coordinator.data:
+            return None
+        coupons = self.coordinator.data.get("coupons", [])
+        return len(self._pending_coupons(coupons))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the full list of available coupons, split free vs. points."""
+        data = self.coordinator.data or {}
+        coupons = self._pending_coupons(data.get("coupons", []))
+        free_coupons = [c for c in coupons if not c.get("loyaltyPoints")]
+        points_coupons = [c for c in coupons if c.get("loyaltyPoints")]
+        return {
+            "account_email": self.coordinator.account_email,
+            "coupons": coupons,
+            "free_coupon_count": len(free_coupons),
+            "points_required_coupon_count": len(points_coupons),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+class KauflandCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Represents the linked Kaufland account's activated *marketplace*
+    coupons (``status != 0``).
+
+    Marketplace-only: this will read 0 unless a coupon was activated some
+    other way (e.g. manually in the Kaufland app) and that state happens to
+    be reflected by the marketplace coupons API - server-side activation
+    from a plain API client is currently rejected (see
+    ``KauflandCouponsCoordinator`` docstring). This sensor never reflects
+    the separate in-store/regular Kaufland Card XTRA coupons shown
+    elsewhere in the app - listing those requires a session cookie
+    (``ALTSESSID``) that has the same anti-automation protection and is
+    intentionally not something this integration tries to obtain.
+    """
+
+    _attr_icon = "mdi:ticket-percent"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Active Marketplace Coupons"
+    _unrecorded_attributes = frozenset({"coupons"})
+
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = f"kaufland_account_{self._account_email}_coupons"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of activated (status != 0) coupons."""
+        if not self.coordinator.data:
+            return None
+        coupons = self.coordinator.data.get("coupons", [])
+        return sum(1 for c in coupons if c.get("status") != 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return coupon details and last auto-activation results."""
+        data = self.coordinator.data or {}
+        return {
+            "account_email": self.coordinator.account_email,
+            "auto_activate_free_coupons": self.coordinator.auto_activate_free_coupons,
+            "coupons": data.get("coupons", []),
+            "activated_this_cycle": data.get("activated_this_cycle", []),
+            "last_activation_error": data.get("last_activation_error"),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+class KauflandAvailableInstoreCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Represents in-store/regular Kaufland Card XTRA coupons that are
+    available to activate (``status == 0``).
+
+    Confirmed live 2026-09: fetched via a separate "loyalty" API
+    (``app.kaufland.net``) that, unlike marketplace coupons, only needs the
+    OAuth bearer token - no session cookie. Field names/values match the
+    marketplace schema (integer ``status``, camelCase ``loyaltyPoints``).
+    """
+
+    _attr_icon = "mdi:ticket-outline"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Available In-store Coupons"
+    _unrecorded_attributes = frozenset({"coupons"})
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = (
+            f"kaufland_account_{self._account_email}_available_instore_coupons"
+        )
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of in-store coupons available to activate."""
+        if not self.coordinator.data:
+            return None
+        coupons = self.coordinator.data.get("instore_coupons", [])
+        return len([c for c in coupons if c.get("status") == 0])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the full list of available in-store coupons, split free vs. points."""
+        data = self.coordinator.data or {}
+        coupons = [
+            c for c in data.get("instore_coupons", []) if c.get("status") == 0
+        ]
+        free_coupons = [c for c in coupons if not c.get("loyaltyPoints")]
+        points_coupons = [c for c in coupons if c.get("loyaltyPoints")]
+        return {
+            "account_email": self.coordinator.account_email,
+            "coupons": coupons,
+            "free_coupon_count": len(free_coupons),
+            "points_required_coupon_count": len(points_coupons),
+            "fetch_error": data.get("instore_fetch_error"),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+class KauflandActiveInstoreCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Represents in-store/regular Kaufland Card XTRA coupons that have
+    already been activated (``status != 0``).
+    """
+
+    _attr_icon = "mdi:ticket-percent"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Active In-store Coupons"
+    _unrecorded_attributes = frozenset({"coupons"})
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = (
+            f"kaufland_account_{self._account_email}_active_instore_coupons"
+        )
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of activated in-store coupons."""
+        if not self.coordinator.data:
+            return None
+        coupons = self.coordinator.data.get("instore_coupons", [])
+        return sum(1 for c in coupons if c.get("status") != 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return in-store coupon details and last auto-activation results."""
+        data = self.coordinator.data or {}
+        return {
+            "account_email": self.coordinator.account_email,
+            "auto_activate_free_coupons": self.coordinator.auto_activate_free_coupons,
+            "coupons": data.get("instore_coupons", []),
+            "activated_this_cycle": data.get("instore_activated_this_cycle", []),
+            "last_activation_error": data.get("instore_last_activation_error"),
+            "fetch_error": data.get("instore_fetch_error"),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+def coordinator_email(coordinator: KauflandCouponsCoordinator) -> str | None:
+    """Return the linked account's email for display in sensor attributes."""
+    return coordinator.account_email
