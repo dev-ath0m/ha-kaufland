@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ATTRIBUTION, CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_ACCOUNT
+from .const import ATTRIBUTION, DOMAIN
 from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,22 +25,27 @@ async def async_setup_entry(
     async_add_entities: Any,
 ) -> None:
     """Set up Kaufland sensors from a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinators = hass.data[DOMAIN][entry.entry_id]
+    entities: list[Any] = []
 
-    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
-        entities: list[Any] = [
-            KauflandAvailableCouponsSensor(coordinator),
-            KauflandCouponsSensor(coordinator),
-            KauflandAvailableInstoreCouponsSensor(coordinator),
-            KauflandActiveInstoreCouponsSensor(coordinator),
-        ]
-        async_add_entities(entities, update_before_add=False)
-        return
+    store_coordinator = coordinators.get("store")
+    if store_coordinator is not None:
+        entities.append(KauflandOffersSensor(store_coordinator))
+        for product_filter in store_coordinator.product_filters:
+            entities.append(
+                KauflandProductFilterSensor(store_coordinator, product_filter)
+            )
 
-    entities: list[Any] = [KauflandOffersSensor(coordinator)]
-
-    for product_filter in coordinator.product_filters:
-        entities.append(KauflandProductFilterSensor(coordinator, product_filter))
+    account_coordinator = coordinators.get("account")
+    if account_coordinator is not None:
+        entities.extend(
+            [
+                KauflandAvailableCouponsSensor(account_coordinator),
+                KauflandCouponsSensor(account_coordinator),
+                KauflandAvailableInstoreCouponsSensor(account_coordinator),
+                KauflandActiveInstoreCouponsSensor(account_coordinator),
+            ]
+        )
 
     async_add_entities(entities, update_before_add=False)
 
