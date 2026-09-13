@@ -16,6 +16,9 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .api import KauflandAPIClient, Store
@@ -24,6 +27,7 @@ from .const import (
     CONF_ACCOUNT_EMAIL,
     CONF_AUTO_ACTIVATE_FREE_COUPONS,
     CONF_ENTRY_TYPE,
+    CONF_INSTORE_SESSION_COOKIE,
     CONF_PRODUCT_FILTERS,
     CONF_REFRESH_TOKEN,
     CONF_STORE_CODE,
@@ -44,6 +48,7 @@ from .coupons_api import (
     extract_code_from_input,
     generate_pkce_pair,
     generate_state,
+    normalize_instore_session_cookie,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -330,14 +335,26 @@ class KauflandAccountOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
+        """Entry point for the account options flow (delegates to the form
+        actually shown, ``account_init``, so its submission is routed back
+        here correctly).
+        """
+        return await self.async_step_account_init(user_input)
+
+    async def async_step_account_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Manage the options."""
         if user_input is not None:
+            raw_cookie = str(user_input.get(CONF_INSTORE_SESSION_COOKIE, "")).strip()
+            instore_cookie = normalize_instore_session_cookie(raw_cookie) if raw_cookie else ""
             return self.async_create_entry(
                 title="",
                 data={
                     CONF_AUTO_ACTIVATE_FREE_COUPONS: user_input[
                         CONF_AUTO_ACTIVATE_FREE_COUPONS
                     ],
+                    CONF_INSTORE_SESSION_COOKIE: instore_cookie,
                 },
             )
 
@@ -352,6 +369,10 @@ class KauflandAccountOptionsFlowHandler(config_entries.OptionsFlow):
                         DEFAULT_AUTO_ACTIVATE_FREE_COUPONS,
                     ),
                 ): bool,
+                vol.Optional(
+                    CONF_INSTORE_SESSION_COOKIE,
+                    default=current.get(CONF_INSTORE_SESSION_COOKIE, ""),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }
         )
 

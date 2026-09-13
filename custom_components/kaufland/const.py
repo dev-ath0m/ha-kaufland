@@ -34,6 +34,7 @@ CONF_REFRESH_TOKEN = "refresh_token"
 CONF_TOKEN_EXPIRES_AT = "token_expires_at"
 CONF_ACCOUNT_EMAIL = "account_email"
 CONF_AUTO_ACTIVATE_FREE_COUPONS = "auto_activate_free_coupons"
+CONF_INSTORE_SESSION_COOKIE = "instore_session_cookie"
 
 DEFAULT_AUTO_ACTIVATE_FREE_COUPONS = True
 DEFAULT_COUPONS_UPDATE_INTERVAL = 6  # hours
@@ -43,3 +44,4 @@ ATTR_ACTIVATED_COUPONS = "activated_coupons"
 ATTR_LAST_ACTIVATION_ERROR = "last_activation_error"
 
 ISSUE_ID_ACCOUNT_REAUTH = "account_reauth_required"
+ISSUE_ID_INSTORE_COOKIE_INVALID = "instore_cookie_invalid"

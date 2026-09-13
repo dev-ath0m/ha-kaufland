@@ -20,6 +20,7 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_EMAIL,
     CONF_AUTO_ACTIVATE_FREE_COUPONS,
+    CONF_INSTORE_SESSION_COOKIE,
     CONF_PRODUCT_FILTERS,
     CONF_REFRESH_TOKEN,
     CONF_STORE_CODE,
@@ -31,6 +32,7 @@ from .const import (
     DOMAIN,
     ISSUE_ID_ACCOUNT_REAUTH,
     ISSUE_ID_CONNECTION,
+    ISSUE_ID_INSTORE_COOKIE_INVALID,
     MIN_UPDATE_INTERVAL,
 )
 from .coupons_api import (
@@ -146,12 +148,21 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     logged at debug level (see ``last_activation_error``) and coupons stay
     visible as pending so they can still be activated manually in the app.
 
-    Marketplace-only: this coordinator only fetches *marketplace* coupons
-    (``/coupons/marketplaceCoupons``). Kaufland's separate in-store/regular
-    Kaufland Card XTRA coupons live behind a different endpoint that
+    Marketplace-only by default: this coordinator only fetches *marketplace*
+    coupons (``/coupons/marketplaceCoupons``). Kaufland's separate in-store/
+    regular Kaufland Card XTRA coupons live behind a different endpoint that
     requires a session cookie (``ALTSESSID``) just to list them - the same
-    kind of WebView-derived session this integration won't try to forge -
-    so those are not available here at all, not even read-only.
+    kind of WebView-derived session this integration won't try to forge.
+
+    Optionally, if the user manually supplies that ``ALTSESSID`` cookie value
+    via the account options flow (``CONF_INSTORE_SESSION_COOKIE`` - copied by
+    the user themselves from an already logged-in browser session on
+    kaufland.de, never obtained or forged by this integration), this
+    coordinator will also fetch in-store coupons (``GET /coupons``) for
+    read-only display. This is opt-in, experimental, and will stop working
+    whenever that manually-supplied cookie expires until the user refreshes
+    it - a repair issue (``instore_cookie_invalid``) is raised when that
+    happens.
     """
 
 
@@ -165,10 +176,14 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.auto_activate_free_coupons: bool = config.get(
             CONF_AUTO_ACTIVATE_FREE_COUPONS, DEFAULT_AUTO_ACTIVATE_FREE_COUPONS
         )
+        self.instore_session_cookie: str | None = (
+            config.get(CONF_INSTORE_SESSION_COOKIE) or None
+        )
 
         self._session = async_get_clientsession(hass)
         self._auth = KauflandAuth(self._session)
         self._issue_created = False
+        self._instore_issue_created = False
 
         super().__init__(
             hass,
@@ -279,9 +294,46 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ir.async_delete_issue(self.hass, DOMAIN, ISSUE_ID_ACCOUNT_REAUTH)
             self._issue_created = False
 
+        instore_coupons: list[dict[str, Any]] = []
+        instore_fetch_error: str | None = None
+        if self.instore_session_cookie:
+            try:
+                instore_payload = await client.get_instore_coupons(
+                    self.instore_session_cookie
+                )
+                instore_coupons = instore_payload.get("coupons", [])
+                if self._instore_issue_created:
+                    ir.async_delete_issue(
+                        self.hass, DOMAIN, ISSUE_ID_INSTORE_COOKIE_INVALID
+                    )
+                    self._instore_issue_created = False
+            except KauflandCouponsApiError as err:
+                # Not fatal for the whole update - marketplace data is still
+                # good. The manually-supplied session cookie has likely
+                # expired; ask the user to refresh it via a repair issue
+                # rather than failing every coordinator refresh.
+                instore_fetch_error = str(err)
+                _LOGGER.debug(
+                    "Kaufland: in-store coupons fetch failed (session cookie "
+                    "likely expired, see account options): %s",
+                    err,
+                )
+                if not self._instore_issue_created:
+                    ir.async_create_issue(
+                        self.hass,
+                        DOMAIN,
+                        ISSUE_ID_INSTORE_COOKIE_INVALID,
+                        is_fixable=False,
+                        severity=ir.IssueSeverity.WARNING,
+                        translation_key="instore_cookie_invalid",
+                    )
+                    self._instore_issue_created = True
+
         return {
             "coupons": coupons,
             "activated_this_cycle": activated,
             "last_activation_error": last_activation_error,
+            "instore_coupons": instore_coupons,
+            "instore_fetch_error": instore_fetch_error,
         }
 

@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from typing import Any
@@ -87,6 +88,22 @@ def extract_code_from_input(user_input: str) -> str:
         if sep in after:
             after = after.split(sep, 1)[0]
     return after
+
+
+_ALTSESSID_COOKIE_PATTERN = re.compile(r"ALTSESSID=([^;\s]+)", re.IGNORECASE)
+
+
+def normalize_instore_session_cookie(raw: str) -> str:
+    """Best-effort extraction of a bare ALTSESSID value from user input.
+
+    Users are asked to copy this cookie value out of their own browser's
+    cookie inspector (see the account options flow), so accept whatever
+    shape they end up pasting: a bare value, an ``ALTSESSID=<value>`` pair,
+    or a full DevTools "Cookie" row/header containing other cookies too.
+    """
+    raw = raw.strip()
+    match = _ALTSESSID_COOKIE_PATTERN.search(raw)
+    return match.group(1) if match else raw
 
 
 def _decode_id_token(id_token: str) -> dict[str, Any]:
@@ -176,6 +193,35 @@ class KauflandCouponsClient:
                 return json.loads(body)
         except aiohttp.ClientError as exc:
             raise KauflandCouponsApiError(f"Kaufland coupons request failed: {exc}") from exc
+
+    async def get_instore_coupons(self, session_cookie: str) -> dict[str, Any]:
+        """Return the raw in-store/regular Kaufland Card XTRA coupons payload.
+
+        Unlike marketplace coupons, this endpoint rejects requests without a
+        session cookie (``ALTSESSID``) even for read access. This
+        integration never obtains or forges that cookie itself - the user
+        must copy it from their own, already logged-in browser session on
+        kaufland.de and paste it into the account options
+        (``normalize_instore_session_cookie`` handles common paste shapes).
+
+        Experimental: the response shape has not been fully verified
+        against a live account yet, so callers should treat unknown fields
+        defensively.
+        """
+        url = f"{COUPONS_API_BASE_URL}/coupons"
+        headers = {**self._headers(), "Cookie": f"ALTSESSID={session_cookie}"}
+        try:
+            async with self._session.get(url, headers=headers) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    raise KauflandCouponsApiError(
+                        f"Kaufland in-store coupons request failed ({resp.status}): {body}"
+                    )
+                return json.loads(body)
+        except aiohttp.ClientError as exc:
+            raise KauflandCouponsApiError(
+                f"Kaufland in-store coupons request failed: {exc}"
+            ) from exc
 
     async def activate_coupon(self, coupon_number: str, exchange_rule_number: str | None) -> dict[str, Any]:
         """Activate a single marketplace coupon by its coupon number (gcn)."""
