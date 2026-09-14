@@ -43,6 +43,25 @@ def _is_upcoming_coupon(coupon: dict[str, Any]) -> bool:
     return start_date > today
 
 
+def _is_marketplace_product_info(coupon: dict[str, Any]) -> bool:
+    """Return True if a *marketplace* feed entry is a plain product/
+    "special offer" listing, not a real per-account coupon.
+
+    Kaufland's marketplace coupons feed mixes real, activatable coupons
+    (which carry a non-empty ``exchangeRuleNumber``, e.g. ``"MKP"``, used
+    to redeem them via the activate endpoint) with plain product-tied
+    discount listings that have no ``exchangeRuleNumber`` at all. Kaufland's
+    activate endpoint accepts a call for these too but never actually
+    changes their status (see ``KauflandCouponsCoordinator``), so there's
+    nothing to "activate" - they're really just informational deals shown
+    alongside real coupons in the same feed. Excluded from the available
+    count and instead counted/listed as already active (see
+    ``KauflandCouponsSensor``). Only applies to marketplace coupons - the
+    in-store/loyalty feed doesn't mix in this kind of listing.
+    """
+    return not coupon.get("exchangeRuleNumber")
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: config_entries.ConfigEntry,
@@ -298,14 +317,18 @@ class KauflandAvailableCouponsSensor(
     def _pending_coupons(coupons: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return coupons that are available to activate right now.
 
-        Excludes coupons that are already activated (``status != 0``) as
-        well as "upcoming" coupons whose validity period hasn't started
-        yet (see ``_is_upcoming_coupon``).
+        Excludes coupons that are already activated (``status != 0``),
+        "upcoming" coupons whose validity period hasn't started yet (see
+        ``_is_upcoming_coupon``), and plain product-info listings that
+        aren't real, activatable coupons (see
+        ``_is_marketplace_product_info``).
         """
         return [
             c
             for c in coupons
-            if c.get("status") == 0 and not _is_upcoming_coupon(c)
+            if c.get("status") == 0
+            and not _is_upcoming_coupon(c)
+            and not _is_marketplace_product_info(c)
         ]
 
     @property
@@ -341,17 +364,22 @@ class KauflandCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
     """Represents the linked Kaufland account's activated *marketplace*
-    coupons (``status != 0``).
+    coupons (``status != 0``), plus plain product-info listings that are
+    mixed into the same feed but aren't real, activatable coupons (see
+    ``_is_marketplace_product_info``) - since there's nothing to activate
+    for those, they're counted here as already "active" instead of shown
+    as pending in ``KauflandAvailableCouponsSensor``.
 
-    Marketplace-only: this will read 0 unless a coupon was activated some
-    other way (e.g. manually in the Kaufland app) and that state happens to
-    be reflected by the marketplace coupons API - server-side activation
-    from a plain API client is currently rejected (see
-    ``KauflandCouponsCoordinator`` docstring). This sensor never reflects
-    the separate in-store/regular Kaufland Card XTRA coupons shown
-    elsewhere in the app - listing those requires a session cookie
-    (``ALTSESSID``) that has the same anti-automation protection and is
-    intentionally not something this integration tries to obtain.
+    Marketplace-only: aside from the product-info listings above, this will
+    read 0 unless a coupon was activated some other way (e.g. manually in
+    the Kaufland app) and that state happens to be reflected by the
+    marketplace coupons API - server-side activation from a plain API
+    client is currently rejected (see ``KauflandCouponsCoordinator``
+    docstring). This sensor never reflects the separate in-store/regular
+    Kaufland Card XTRA coupons shown elsewhere in the app - listing those
+    requires a session cookie (``ALTSESSID``) that has the same
+    anti-automation protection and is intentionally not something this
+    integration tries to obtain.
     """
 
     _attr_icon = "mdi:ticket-percent"
@@ -375,11 +403,17 @@ class KauflandCouponsSensor(
 
     @property
     def native_value(self) -> int | None:
-        """Return the number of activated (status != 0) coupons."""
+        """Return the number of activated coupons, plus non-activatable
+        product-info listings (``status != 0``, or no ``exchangeRuleNumber``).
+        """
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("coupons", [])
-        return sum(1 for c in coupons if c.get("status") != 0)
+        return sum(
+            1
+            for c in coupons
+            if c.get("status") != 0 or _is_marketplace_product_info(c)
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
