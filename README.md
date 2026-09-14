@@ -80,7 +80,12 @@ same OAuth (PKCE) flow as the official Kaufland app.
 - **🎟️ Kaufland Account Features** *(optional, requires login)*:
   - **Available/Active Coupons**: sensors for Marketplace coupons and
     in-store Kaufland Card XTRA coupons, split into available and
-    active/activated.
+    active/activated. Coupons that are fetched but not usable yet (e.g.
+    a future-dated "Deal des Tages" preview) are excluded from these
+    counts.
+  - **Upcoming Coupons**: a display-only sensor listing coupons that have
+    already appeared in the feed but aren't usable yet (Marketplace and
+    in-store combined) — handy to see what's coming up next.
   - **Automatic Coupon Activation**: free coupons (0 loyalty points) are
     activated automatically on each refresh; coupons that cost loyalty
     points are never touched.
