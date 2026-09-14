@@ -68,6 +68,7 @@ async def async_setup_entry(
                 KauflandCouponsSensor(account_coordinator),
                 KauflandAvailableInstoreCouponsSensor(account_coordinator),
                 KauflandActiveInstoreCouponsSensor(account_coordinator),
+                KauflandUpcomingCouponsSensor(account_coordinator),
             ]
         )
 
@@ -517,6 +518,88 @@ class KauflandActiveInstoreCouponsSensor(
             "activated_this_cycle": data.get("instore_activated_this_cycle", []),
             "last_activation_error": data.get("instore_last_activation_error"),
             "fetch_error": data.get("instore_fetch_error"),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+class KauflandUpcomingCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Display-only sensor for coupons (marketplace + in-store) that have
+    already appeared in the feed but aren't usable yet (see
+    ``_is_upcoming_coupon`` - e.g. "Deal des Tages" previews or a future
+    ``startDate``).
+
+    This is purely informational: these coupons are intentionally excluded
+    from ``KauflandAvailableCouponsSensor``/``KauflandAvailableInstoreCouponsSensor``
+    (and are never auto-activated) since they can't actually be redeemed
+    yet - this sensor just lets you see what's coming up next.
+    """
+
+    _attr_icon = "mdi:ticket-confirmation-outline"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Upcoming Coupons"
+    _unrecorded_attributes = frozenset(
+        {"coupons", "marketplace_coupons", "instore_coupons"}
+    )
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = f"kaufland_account_{self._account_email}_upcoming_coupons"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @property
+    def _upcoming_marketplace_coupons(self) -> list[dict[str, Any]]:
+        data = self.coordinator.data or {}
+        return [
+            c
+            for c in data.get("coupons", [])
+            if c.get("status") == 0 and _is_upcoming_coupon(c)
+        ]
+
+    @property
+    def _upcoming_instore_coupons(self) -> list[dict[str, Any]]:
+        data = self.coordinator.data or {}
+        return [
+            c
+            for c in data.get("instore_coupons", [])
+            if c.get("status") == 0 and _is_upcoming_coupon(c)
+        ]
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the total number of upcoming (not-yet-usable) coupons."""
+        if not self.coordinator.data:
+            return None
+        return len(self._upcoming_marketplace_coupons) + len(
+            self._upcoming_instore_coupons
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the upcoming coupons, split by category."""
+        marketplace_coupons = self._upcoming_marketplace_coupons
+        instore_coupons = self._upcoming_instore_coupons
+        return {
+            "account_email": self.coordinator.account_email,
+            "coupons": marketplace_coupons + instore_coupons,
+            "marketplace_coupons": marketplace_coupons,
+            "instore_coupons": instore_coupons,
+            "marketplace_count": len(marketplace_coupons),
+            "instore_count": len(instore_coupons),
             ATTR_ATTRIBUTION: ATTRIBUTION,
         }
 
