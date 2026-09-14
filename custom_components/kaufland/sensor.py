@@ -12,11 +12,35 @@ from homeassistant.const import ATTR_ATTRIBUTION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import ATTRIBUTION, DOMAIN
 from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_upcoming_coupon(coupon: dict[str, Any]) -> bool:
+    """Return True if a fetched coupon isn't actually usable yet.
+
+    Kaufland's coupon feeds can include coupons that are already fetched
+    (``status == 0``, i.e. not yet activated) but aren't really available
+    to the user yet:
+    - In-store (loyalty) coupons expose ``buttonActive: false`` for
+      "Deal des Tages" style daily previews that aren't activatable yet.
+    - Both marketplace and in-store coupons carry a ``startDate`` - if it's
+      in the future, the coupon hasn't started yet even though it's
+      already present in the feed.
+    These "upcoming" coupons should not be counted/listed as available.
+    """
+    if coupon.get("buttonActive") is False:
+        return True
+    start_raw = coupon.get("startDate") or coupon.get("validFrom")
+    if not start_raw:
+        return False
+    start_date = str(start_raw)[:10]
+    today = dt_util.now().date().isoformat()
+    return start_date > today
 
 
 async def async_setup_entry(
@@ -271,8 +295,17 @@ class KauflandAvailableCouponsSensor(
 
     @staticmethod
     def _pending_coupons(coupons: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return coupons that are still available to activate (status 0)."""
-        return [c for c in coupons if c.get("status") == 0]
+        """Return coupons that are available to activate right now.
+
+        Excludes coupons that are already activated (``status != 0``) as
+        well as "upcoming" coupons whose validity period hasn't started
+        yet (see ``_is_upcoming_coupon``).
+        """
+        return [
+            c
+            for c in coupons
+            if c.get("status") == 0 and not _is_upcoming_coupon(c)
+        ]
 
     @property
     def native_value(self) -> int | None:
@@ -400,18 +433,26 @@ class KauflandAvailableInstoreCouponsSensor(
 
     @property
     def native_value(self) -> int | None:
-        """Return the number of in-store coupons available to activate."""
+        """Return the number of in-store coupons available to activate now."""
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("instore_coupons", [])
-        return len([c for c in coupons if c.get("status") == 0])
+        return len(
+            [
+                c
+                for c in coupons
+                if c.get("status") == 0 and not _is_upcoming_coupon(c)
+            ]
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the full list of available in-store coupons, split free vs. points."""
         data = self.coordinator.data or {}
         coupons = [
-            c for c in data.get("instore_coupons", []) if c.get("status") == 0
+            c
+            for c in data.get("instore_coupons", [])
+            if c.get("status") == 0 and not _is_upcoming_coupon(c)
         ]
         free_coupons = [c for c in coupons if not c.get("loyaltyPoints")]
         points_coupons = [c for c in coupons if c.get("loyaltyPoints")]
