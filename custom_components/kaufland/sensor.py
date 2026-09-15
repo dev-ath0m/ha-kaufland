@@ -12,11 +12,54 @@ from homeassistant.const import ATTR_ATTRIBUTION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
-from .const import ATTRIBUTION, CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_ACCOUNT
+from .const import ATTRIBUTION, DOMAIN
 from .coordinator import KauflandCouponsCoordinator, KauflandDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_upcoming_coupon(coupon: dict[str, Any]) -> bool:
+    """Return True if a fetched coupon isn't actually usable yet.
+
+    Kaufland's coupon feeds can include coupons that are already fetched
+    (``status == 0``, i.e. not yet activated) but aren't really available
+    to the user yet:
+    - In-store (loyalty) coupons expose ``buttonActive: false`` for
+      "Deal des Tages" style daily previews that aren't activatable yet.
+    - Both marketplace and in-store coupons carry a ``startDate`` - if it's
+      in the future, the coupon hasn't started yet even though it's
+      already present in the feed.
+    These "upcoming" coupons should not be counted/listed as available.
+    """
+    if coupon.get("buttonActive") is False:
+        return True
+    start_raw = coupon.get("startDate") or coupon.get("validFrom")
+    if not start_raw:
+        return False
+    start_date = str(start_raw)[:10]
+    today = dt_util.now().date().isoformat()
+    return start_date > today
+
+
+def _is_marketplace_product_info(coupon: dict[str, Any]) -> bool:
+    """Return True if a *marketplace* feed entry is a plain product/
+    "special offer" listing, not a real per-account coupon.
+
+    Kaufland's marketplace coupons feed mixes real, activatable coupons
+    (which carry a non-empty ``exchangeRuleNumber``, e.g. ``"MKP"``, used
+    to redeem them via the activate endpoint) with plain product-tied
+    discount listings that have no ``exchangeRuleNumber`` at all. Kaufland's
+    activate endpoint accepts a call for these too but never actually
+    changes their status (see ``KauflandCouponsCoordinator``), so there's
+    nothing to "activate" - they're really just informational deals shown
+    alongside real coupons in the same feed. Excluded from the available
+    count and instead counted/listed as already active (see
+    ``KauflandCouponsSensor``). Only applies to marketplace coupons - the
+    in-store/loyalty feed doesn't mix in this kind of listing.
+    """
+    return not coupon.get("exchangeRuleNumber")
 
 
 async def async_setup_entry(
@@ -25,22 +68,28 @@ async def async_setup_entry(
     async_add_entities: Any,
 ) -> None:
     """Set up Kaufland sensors from a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinators = hass.data[DOMAIN][entry.entry_id]
+    entities: list[Any] = []
 
-    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_ACCOUNT:
-        entities: list[Any] = [
-            KauflandAvailableCouponsSensor(coordinator),
-            KauflandCouponsSensor(coordinator),
-            KauflandAvailableInstoreCouponsSensor(coordinator),
-            KauflandActiveInstoreCouponsSensor(coordinator),
-        ]
-        async_add_entities(entities, update_before_add=False)
-        return
+    store_coordinator = coordinators.get("store")
+    if store_coordinator is not None:
+        entities.append(KauflandOffersSensor(store_coordinator))
+        for product_filter in store_coordinator.product_filters:
+            entities.append(
+                KauflandProductFilterSensor(store_coordinator, product_filter)
+            )
 
-    entities: list[Any] = [KauflandOffersSensor(coordinator)]
-
-    for product_filter in coordinator.product_filters:
-        entities.append(KauflandProductFilterSensor(coordinator, product_filter))
+    account_coordinator = coordinators.get("account")
+    if account_coordinator is not None:
+        entities.extend(
+            [
+                KauflandAvailableCouponsSensor(account_coordinator),
+                KauflandCouponsSensor(account_coordinator),
+                KauflandAvailableInstoreCouponsSensor(account_coordinator),
+                KauflandActiveInstoreCouponsSensor(account_coordinator),
+                KauflandUpcomingCouponsSensor(account_coordinator),
+            ]
+        )
 
     async_add_entities(entities, update_before_add=False)
 
@@ -266,8 +315,21 @@ class KauflandAvailableCouponsSensor(
 
     @staticmethod
     def _pending_coupons(coupons: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return coupons that are still available to activate (status 0)."""
-        return [c for c in coupons if c.get("status") == 0]
+        """Return coupons that are available to activate right now.
+
+        Excludes coupons that are already activated (``status != 0``),
+        "upcoming" coupons whose validity period hasn't started yet (see
+        ``_is_upcoming_coupon``), and plain product-info listings that
+        aren't real, activatable coupons (see
+        ``_is_marketplace_product_info``).
+        """
+        return [
+            c
+            for c in coupons
+            if c.get("status") == 0
+            and not _is_upcoming_coupon(c)
+            and not _is_marketplace_product_info(c)
+        ]
 
     @property
     def native_value(self) -> int | None:
@@ -302,17 +364,22 @@ class KauflandCouponsSensor(
     CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
 ):
     """Represents the linked Kaufland account's activated *marketplace*
-    coupons (``status != 0``).
+    coupons (``status != 0``), plus plain product-info listings that are
+    mixed into the same feed but aren't real, activatable coupons (see
+    ``_is_marketplace_product_info``) - since there's nothing to activate
+    for those, they're counted here as already "active" instead of shown
+    as pending in ``KauflandAvailableCouponsSensor``.
 
-    Marketplace-only: this will read 0 unless a coupon was activated some
-    other way (e.g. manually in the Kaufland app) and that state happens to
-    be reflected by the marketplace coupons API - server-side activation
-    from a plain API client is currently rejected (see
-    ``KauflandCouponsCoordinator`` docstring). This sensor never reflects
-    the separate in-store/regular Kaufland Card XTRA coupons shown
-    elsewhere in the app - listing those requires a session cookie
-    (``ALTSESSID``) that has the same anti-automation protection and is
-    intentionally not something this integration tries to obtain.
+    Marketplace-only: aside from the product-info listings above, this will
+    read 0 unless a coupon was activated some other way (e.g. manually in
+    the Kaufland app) and that state happens to be reflected by the
+    marketplace coupons API - server-side activation from a plain API
+    client is currently rejected (see ``KauflandCouponsCoordinator``
+    docstring). This sensor never reflects the separate in-store/regular
+    Kaufland Card XTRA coupons shown elsewhere in the app - listing those
+    requires a session cookie (``ALTSESSID``) that has the same
+    anti-automation protection and is intentionally not something this
+    integration tries to obtain.
     """
 
     _attr_icon = "mdi:ticket-percent"
@@ -336,11 +403,17 @@ class KauflandCouponsSensor(
 
     @property
     def native_value(self) -> int | None:
-        """Return the number of activated (status != 0) coupons."""
+        """Return the number of activated coupons, plus non-activatable
+        product-info listings (``status != 0``, or no ``exchangeRuleNumber``).
+        """
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("coupons", [])
-        return sum(1 for c in coupons if c.get("status") != 0)
+        return sum(
+            1
+            for c in coupons
+            if c.get("status") != 0 or _is_marketplace_product_info(c)
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -395,18 +468,26 @@ class KauflandAvailableInstoreCouponsSensor(
 
     @property
     def native_value(self) -> int | None:
-        """Return the number of in-store coupons available to activate."""
+        """Return the number of in-store coupons available to activate now."""
         if not self.coordinator.data:
             return None
         coupons = self.coordinator.data.get("instore_coupons", [])
-        return len([c for c in coupons if c.get("status") == 0])
+        return len(
+            [
+                c
+                for c in coupons
+                if c.get("status") == 0 and not _is_upcoming_coupon(c)
+            ]
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the full list of available in-store coupons, split free vs. points."""
         data = self.coordinator.data or {}
         coupons = [
-            c for c in data.get("instore_coupons", []) if c.get("status") == 0
+            c
+            for c in data.get("instore_coupons", [])
+            if c.get("status") == 0 and not _is_upcoming_coupon(c)
         ]
         free_coupons = [c for c in coupons if not c.get("loyaltyPoints")]
         points_coupons = [c for c in coupons if c.get("loyaltyPoints")]
@@ -471,6 +552,88 @@ class KauflandActiveInstoreCouponsSensor(
             "activated_this_cycle": data.get("instore_activated_this_cycle", []),
             "last_activation_error": data.get("instore_last_activation_error"),
             "fetch_error": data.get("instore_fetch_error"),
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if coordinator has data."""
+        return self.coordinator.data is not None
+
+
+class KauflandUpcomingCouponsSensor(
+    CoordinatorEntity[KauflandCouponsCoordinator], SensorEntity
+):
+    """Display-only sensor for coupons (marketplace + in-store) that have
+    already appeared in the feed but aren't usable yet (see
+    ``_is_upcoming_coupon`` - e.g. "Deal des Tages" previews or a future
+    ``startDate``).
+
+    This is purely informational: these coupons are intentionally excluded
+    from ``KauflandAvailableCouponsSensor``/``KauflandAvailableInstoreCouponsSensor``
+    (and are never auto-activated) since they can't actually be redeemed
+    yet - this sensor just lets you see what's coming up next.
+    """
+
+    _attr_icon = "mdi:ticket-confirmation-outline"
+    _attr_native_unit_of_measurement = "coupons"
+    _attr_has_entity_name = True
+    _attr_name = "Upcoming Coupons"
+    _unrecorded_attributes = frozenset(
+        {"coupons", "marketplace_coupons", "instore_coupons"}
+    )
+
+    def __init__(self, coordinator: KauflandCouponsCoordinator) -> None:
+        """Initialize sensor."""
+        super().__init__(coordinator)
+        self._account_email = coordinator.account_email or coordinator.config_entry.entry_id
+        self._attr_unique_id = f"kaufland_account_{self._account_email}_upcoming_coupons"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._account_email)},
+            name=coordinator.config_entry.title,
+            manufacturer="Kaufland",
+            model="Account",
+        )
+
+    @property
+    def _upcoming_marketplace_coupons(self) -> list[dict[str, Any]]:
+        data = self.coordinator.data or {}
+        return [
+            c
+            for c in data.get("coupons", [])
+            if c.get("status") == 0 and _is_upcoming_coupon(c)
+        ]
+
+    @property
+    def _upcoming_instore_coupons(self) -> list[dict[str, Any]]:
+        data = self.coordinator.data or {}
+        return [
+            c
+            for c in data.get("instore_coupons", [])
+            if c.get("status") == 0 and _is_upcoming_coupon(c)
+        ]
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the total number of upcoming (not-yet-usable) coupons."""
+        if not self.coordinator.data:
+            return None
+        return len(self._upcoming_marketplace_coupons) + len(
+            self._upcoming_instore_coupons
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the upcoming coupons, split by category."""
+        marketplace_coupons = self._upcoming_marketplace_coupons
+        instore_coupons = self._upcoming_instore_coupons
+        return {
+            "account_email": self.coordinator.account_email,
+            "coupons": marketplace_coupons + instore_coupons,
+            "marketplace_coupons": marketplace_coupons,
+            "instore_coupons": instore_coupons,
+            "marketplace_count": len(marketplace_coupons),
+            "instore_count": len(instore_coupons),
             ATTR_ATTRIBUTION: ATTRIBUTION,
         }
 

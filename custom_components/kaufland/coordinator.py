@@ -152,12 +152,15 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     Not every entry in the marketplace coupons feed is a real, per-account
     activatable coupon - some are plain product/"special offer" listings
-    mixed into the same feed. Kaufland's activate endpoint returns success
-    (``200``) for these too, without ever actually changing their status, so
-    this coordinator verifies the status actually changed (via a follow-up
-    fetch) before counting/reporting a coupon as activated, and remembers
-    non-activatable gcns for the lifetime of the coordinator to avoid
-    retrying them every update cycle.
+    mixed into the same feed, identifiable by having no ``exchangeRuleNumber``
+    (real coupons carry one, e.g. ``"MKP"``, used to redeem them). These are
+    proactively skipped rather than attempted (see
+    ``_is_marketplace_product_info``) - Kaufland's activate endpoint returns
+    success (``200``) for these too, without ever actually changing their
+    status, so as a safety net this coordinator also verifies the status
+    actually changed (via a follow-up fetch) before counting/reporting any
+    coupon as activated, and remembers non-activatable gcns for the lifetime
+    of the coordinator to avoid retrying them every update cycle.
 
     This coordinator also fetches and auto-activates in-store/regular
     Kaufland Card XTRA coupons (``storeCoupons``), via a completely
@@ -227,6 +230,18 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True if a coupon costs 0 loyalty points to activate."""
         return not coupon.get("loyaltyPoints")
 
+    @staticmethod
+    def _is_marketplace_product_info(coupon: dict[str, Any]) -> bool:
+        """Return True if a marketplace feed entry is a plain product/
+        "special offer" listing, not a real per-account coupon.
+
+        These have no ``exchangeRuleNumber`` (real, activatable coupons
+        always carry one, e.g. ``"MKP"``) so there's nothing to redeem -
+        skip them instead of wasting an activation call that Kaufland's
+        backend accepts but never actually applies.
+        """
+        return not coupon.get("exchangeRuleNumber")
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch current coupons and auto-activate the free (0 point) ones."""
         try:
@@ -265,6 +280,8 @@ class KauflandCouponsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 gcn = coupon.get("gcn")
                 if not gcn or coupon.get("status") != 0:
                     continue  # already activated, expired, or no id
+                if self._is_marketplace_product_info(coupon):
+                    continue  # plain product listing - nothing to activate
                 if not self._is_free_to_activate(coupon):
                     continue  # costs loyalty points - never auto-activate
                 if gcn in self._non_activatable_gcns:
