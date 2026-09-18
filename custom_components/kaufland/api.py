@@ -274,8 +274,11 @@ class KauflandAPIClient:
                             "title": title,
                             "category": category_name,
                             "category_color": category_color,
-                            "subtitle": (offer.get("detailDescription") or "").strip(),
-                            "price_per_unit": offer.get("unit") or "",
+                            "base_price": (
+                                offer.get("unit")
+                                or offer.get("pricePerUnit")
+                                or ""
+                            ),
                             "price": str(
                                 offer.get("formattedPrice")
                                 or offer.get("price")
@@ -283,21 +286,21 @@ class KauflandAPIClient:
                             ),
                             "old_price": str(offer.get("formattedOldPrice") or ""),
                             "discount": f"-{discount}%" if discount else "",
-                            "image_url": offer.get("listImage") or "",
-                            "date_from": offer.get("dateFrom"),
-                            "date_to": offer.get("dateTo"),
+                            "picture_link": offer.get("listImage") or "",
+                            "valid_from": offer.get("dateFrom"),
+                            "valid_until": offer.get("dateTo"),
                         }
                     )
 
-        date_froms = [offer["date_from"] for offer in offers if offer.get("date_from")]
-        date_tos = [offer["date_to"] for offer in offers if offer.get("date_to")]
+        date_froms = [offer["valid_from"] for offer in offers if offer.get("valid_from")]
+        date_tos = [offer["valid_until"] for offer in offers if offer.get("valid_until")]
         valid_from = min(date_froms) if date_froms else None
         valid_until = max(date_tos) if date_tos else None
 
         offers_by_date: dict[str, list[dict[str, Any]]] = {}
         for offer in offers:
-            date_from = offer.get("date_from")
-            date_to = offer.get("date_to")
+            date_from = offer.get("valid_from")
+            date_to = offer.get("valid_until")
             if not date_from:
                 continue
             key = date_from if date_from == date_to else f"{date_from} – {date_to}"
