@@ -44,6 +44,52 @@ _SSR_MARKER = "window.SSR['"
 _OFFER_TEMPLATE_MARKER = '"component":"OfferTemplate"'
 
 
+
+def _first_non_empty(data: dict[str, Any], *keys: str) -> Any:
+    """Return the first non-empty value from a mapping."""
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _extract_base_price(offer: dict[str, Any]) -> str:
+    """Return a real unit/base price, never the descriptive ``unit`` text."""
+    value = _first_non_empty(offer, "pricePerUnit", "formattedPricePerUnit", "basePrice", "formattedBasePrice", "unitPrice", "formattedUnitPrice")
+    if value not in (None, ""):
+        return str(value).strip()
+    unit = str(offer.get("unit") or "").strip()
+    if "€" in unit or "EUR" in unit.upper():
+        return unit
+    return ""
+
+
+def _extract_picture_link(offer: dict[str, Any]) -> str:
+    """Return the first usable product image URL from the offer payload."""
+    value = _first_non_empty(offer, "listImage", "image", "imageUrl", "imageURL", "picture", "pictureLink", "productImage", "detailImage")
+    if value:
+        return str(value).strip()
+    images = offer.get("images")
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, str) and image.strip():
+                return image.strip()
+            if isinstance(image, dict):
+                nested = _first_non_empty(image, "url", "src", "imageUrl", "href")
+                if nested:
+                    return str(nested).strip()
+    return ""
+
+
+def _extract_date(offer: dict[str, Any], parent: dict[str, Any], *keys: str) -> Any:
+    """Return an offer date, falling back to its category/cycle dates."""
+    value = _first_non_empty(offer, *keys)
+    if value not in (None, ""):
+        return value
+    return _first_non_empty(parent, *keys)
+
+
 def _find_matching_brace(text: str, start: int) -> int | None:
     """Return the index of the ``}`` that closes the ``{`` at ``start``."""
     depth = 0
@@ -251,6 +297,13 @@ class KauflandAPIClient:
                 category_name = category.get("displayName") or category.get("name") or ""
                 category_color = category.get("colorCode")
                 for offer in category.get("offers", []):
+                    valid_from_offer = _extract_date(offer, category, "dateFrom", "validFrom")
+                    valid_until_offer = _extract_date(offer, category, "dateTo", "validUntil")
+                    if valid_from_offer in (None, ""):
+                        valid_from_offer = _first_non_empty(cycle, "dateFrom", "validFrom")
+                    if valid_until_offer in (None, ""):
+                        valid_until_offer = _first_non_empty(cycle, "dateTo", "validUntil")
+
                     # For most offers ``title`` already is the full product
                     # name (``subtitle`` is null). For branded articles
                     # (e.g. house brands like "PARKSIDE®"), ``title`` is only
@@ -274,11 +327,7 @@ class KauflandAPIClient:
                             "title": title,
                             "category": category_name,
                             "category_color": category_color,
-                            "base_price": (
-                                offer.get("unit")
-                                or offer.get("pricePerUnit")
-                                or ""
-                            ),
+                            "base_price": _extract_base_price(offer),
                             "price": str(
                                 offer.get("formattedPrice")
                                 or offer.get("price")
@@ -286,9 +335,9 @@ class KauflandAPIClient:
                             ),
                             "old_price": str(offer.get("formattedOldPrice") or ""),
                             "discount": f"-{discount}%" if discount else "",
-                            "picture_link": offer.get("listImage") or "",
-                            "valid_from": offer.get("dateFrom"),
-                            "valid_until": offer.get("dateTo"),
+                            "picture_link": _extract_picture_link(offer),
+                            "valid_from": valid_from_offer,
+                            "valid_until": valid_until_offer,
                         }
                     )
 
