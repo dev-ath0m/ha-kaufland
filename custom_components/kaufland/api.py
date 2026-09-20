@@ -338,11 +338,6 @@ class KauflandAPIClient:
                             "picture_link": _extract_picture_link(offer),
                             "valid_from": valid_from_offer,
                             "valid_until": valid_until_offer,
-                            # Lidl exposes the offer end date as ``end_date``.
-                            # Keep the canonical ``valid_until`` field as well,
-                            # while providing the same raw alias for consumers
-                            # that use the Lidl offer shape.
-                            "end_date": valid_until_offer,
                         }
                     )
 
