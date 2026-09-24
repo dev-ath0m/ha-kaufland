@@ -297,12 +297,30 @@ class KauflandAPIClient:
                 category_name = category.get("displayName") or category.get("name") or ""
                 category_color = category.get("colorCode")
                 for offer in category.get("offers", []):
-                    valid_from_offer = _extract_date(offer, category, "dateFrom", "validFrom")
-                    valid_until_offer = _extract_date(offer, category, "dateTo", "validUntil")
+                    # ``dateFrom``/``dateTo`` mark the (sometimes earlier)
+                    # advertising/preview window - e.g. "Angebote zum
+                    # Wochenstart" offers are shown from the current cycle's
+                    # start even though the item only actually goes on sale
+                    # the following Monday. ``salesFrom``/``salesTo`` is the
+                    # authoritative in-store sale window Kaufland itself
+                    # displays to customers, so prefer it when present and
+                    # only fall back to ``dateFrom``/``dateTo``/``validFrom``/
+                    # ``validUntil`` for offers that don't set it (which is
+                    # the common case for regular full-week offers).
+                    valid_from_offer = _extract_date(
+                        offer, category, "salesFrom", "dateFrom", "validFrom"
+                    )
+                    valid_until_offer = _extract_date(
+                        offer, category, "salesTo", "dateTo", "validUntil"
+                    )
                     if valid_from_offer in (None, ""):
-                        valid_from_offer = _first_non_empty(cycle, "dateFrom", "validFrom")
+                        valid_from_offer = _first_non_empty(
+                            cycle, "salesFrom", "dateFrom", "validFrom"
+                        )
                     if valid_until_offer in (None, ""):
-                        valid_until_offer = _first_non_empty(cycle, "dateTo", "validUntil")
+                        valid_until_offer = _first_non_empty(
+                            cycle, "salesTo", "dateTo", "validUntil"
+                        )
 
                     # For most offers ``title`` already is the full product
                     # name (``subtitle`` is null). For branded articles
